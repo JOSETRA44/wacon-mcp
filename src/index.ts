@@ -271,6 +271,12 @@ daemon
     try {
       process.kill(info.pid);
       clearDaemonInfo();
+      // Wait until the port is actually released so an immediate restart
+      // doesn't race into EADDRINUSE.
+      const deadline = Date.now() + 8_000;
+      while (Date.now() < deadline && (await pingDaemon(info, 500))) {
+        await new Promise((r) => setTimeout(r, 250));
+      }
       console.log(pc.green("daemon stopped"));
     } catch (err) {
       die(err);

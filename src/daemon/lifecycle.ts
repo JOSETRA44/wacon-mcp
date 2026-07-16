@@ -65,8 +65,9 @@ export async function ensureDaemon(): Promise<DaemonInfo> {
   });
   child.unref();
 
-  // The HTTP server comes up before the WhatsApp socket, so this is quick.
-  const deadline = Date.now() + 15_000;
+  // The HTTP server comes up before the WhatsApp socket, so this is quick
+  // unless a previous daemon is still releasing the port.
+  const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 300));
     const info = readDaemonInfo();

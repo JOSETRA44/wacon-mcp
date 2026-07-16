@@ -1,5 +1,6 @@
 import type { MessageRow } from "../core/store.js";
 import type { StatusInfo, SendResult } from "../core/service.js";
+import type { RecallResult } from "../memory/recall.js";
 import type { ContactProfile, ProfileSection } from "../memory/profiles.js";
 import type { StyleStats } from "../memory/analyzer.js";
 import type { ConnectionState } from "../core/connection.js";
@@ -28,6 +29,10 @@ export interface WaconApi {
   listChats(limit?: number): Promise<unknown[]>;
   readMessages(chat: string, limit?: number, beforeTs?: number): Promise<MessageRow[]>;
   searchMessages(query: string, chat?: string, limit?: number): Promise<(MessageRow & { snippet: string })[]>;
+  recall(query: string, chat?: string, limit?: number): Promise<RecallResult>;
+  listEpisodes(chat: string, limit?: number): Promise<unknown[]>;
+  readEpisode(episodeId: number): Promise<unknown>;
+  summarizeEpisode(episodeId: number, summary: string): Promise<unknown>;
   searchContacts(query: string, limit?: number): Promise<unknown[]>;
   groupInfo(groupJid: string): Promise<GroupInfo>;
   send(chat: string, text: string, clientName: string): Promise<SendResult>;
@@ -48,6 +53,10 @@ export function localApi(service: WaconService): WaconApi {
     listChats: async (limit) => service.listChats(limit),
     readMessages: async (chat, limit, beforeTs) => service.readMessages(chat, limit, beforeTs),
     searchMessages: async (query, chat, limit) => service.searchMessages(query, chat, limit),
+    recall: async (query, chat, limit) => service.recall(query, chat, limit),
+    listEpisodes: async (chat, limit) => service.listEpisodes(chat, limit),
+    readEpisode: async (episodeId) => service.readEpisode(episodeId),
+    summarizeEpisode: async (episodeId, summary) => service.summarizeEpisode(episodeId, summary),
     searchContacts: async (query, limit) => service.searchContacts(query, limit),
     groupInfo: (groupJid) => service.groupInfo(groupJid),
     send: (chat, text, clientName) => service.send(chat, text, clientName),

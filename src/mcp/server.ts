@@ -145,6 +145,91 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
   );
 
   server.registerTool(
+    "recall_context",
+    {
+      title: "Hybrid memory recall (RAG)",
+      description:
+        "The strongest retrieval tool: hybrid search over the whole history combining keyword match (BM25), semantic similarity (robust to typos/slang, e.g. 'q onda' matches 'que onda'), and recency — plus any agent-written episode summaries that match. Use this before replying to recover shared context: past plans, commitments, running topics, how something was left. Prefer this over search_messages unless you need exact keyword matching.",
+      inputSchema: {
+        query: z.string().min(2).describe("What you want to remember, in natural language (Spanish or English)"),
+        chat: z.string().optional().describe("Restrict to this chat JID or phone (recommended when drafting a reply)"),
+        limit: z.number().int().min(1).max(50).default(12),
+      },
+    },
+    async ({ query, chat, limit }) => {
+      const result = await api.recall(query, chat, limit);
+      return json({
+        messages: result.messages.map((h) => ({
+          chat: h.message.chat_jid,
+          at: iso(h.message.timestamp),
+          from: h.message.from_me ? "me" : (h.message.sender_jid ?? "unknown"),
+          text: h.message.text,
+          matchedBy: h.matchedBy,
+        })),
+        episodeSummaries: result.episodes.map((e) => ({
+          episodeId: e.id,
+          chat: e.chat_jid,
+          from: iso(e.start_ts),
+          to: iso(e.end_ts),
+          summary: e.summary,
+        })),
+      });
+    }
+  );
+
+  server.registerTool(
+    "list_episodes",
+    {
+      title: "List conversation episodes",
+      description:
+        "Segment a chat's history into conversation episodes (separated by >3h of silence) and list them, newest first, with agent-written summaries where they exist. Episodes without summary are opportunities: read them with read_episode and consolidate them with summarize_episode.",
+      inputSchema: {
+        chat: z.string().describe("Chat JID or phone number"),
+        limit: z.number().int().min(1).max(100).default(20),
+      },
+    },
+    async ({ chat, limit }) => {
+      const episodes = (await api.listEpisodes(chat, limit)) as { id: number; start_ts: number; end_ts: number; message_count: number; summary: string | null }[];
+      return json(
+        episodes.map((e) => ({
+          episodeId: e.id,
+          from: iso(e.start_ts),
+          to: iso(e.end_ts),
+          messages: e.message_count,
+          summary: e.summary ?? "(sin resumen — léelo con read_episode y consolídalo con summarize_episode)",
+        }))
+      );
+    }
+  );
+
+  server.registerTool(
+    "read_episode",
+    {
+      title: "Read a full conversation episode",
+      description: "Read all messages of one episode (by episodeId from list_episodes). Use before writing its summary.",
+      inputSchema: { episode_id: z.number().int().describe("Episode id from list_episodes") },
+    },
+    async ({ episode_id }) => {
+      const result = (await api.readEpisode(episode_id)) as { episode: unknown; messages: Parameters<typeof formatMessages>[0] };
+      return json({ episode: result.episode, messages: formatMessages(result.messages) });
+    }
+  );
+
+  server.registerTool(
+    "summarize_episode",
+    {
+      title: "Consolidate an episode into long-term memory",
+      description:
+        "Store a concise summary of a conversation episode (what happened, decisions, emotional tone, open threads). Summaries are semantically indexed and surface in recall_context, so THIS is how conversations become durable memory. Write in third person, past tense, max ~3 sentences, in the user's language.",
+      inputSchema: {
+        episode_id: z.number().int(),
+        summary: z.string().min(10).max(600).describe("Concise factual summary of the episode"),
+      },
+    },
+    async ({ episode_id, summary }) => json(await api.summarizeEpisode(episode_id, summary))
+  );
+
+  server.registerTool(
     "search_contacts",
     {
       title: "Find a contact or group",
@@ -171,7 +256,7 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
     {
       title: "Send a WhatsApp message as the user",
       description:
-        "Send a text message impersonating the user. MANDATORY workflow before calling this: 1) get_contact_profile for this chat to learn tone/emojis/formality and the user's global persona, 2) read_messages to see the live context, 3) draft matching the user's voice for THIS relationship. After a meaningful exchange, record new insights with update_contact_profile. Sends are rate-limited and may be in dry-run mode (check the response).",
+        "Send a text message impersonating the user. MANDATORY workflow before calling this: 1) get_contact_profile for this chat to learn tone/emojis/formality and the user's global persona, 2) read_messages to see the live context, 3) recall_context if the reply touches anything from the past (plans, promises, running topics), 4) draft matching the user's voice for THIS relationship. Afterwards, record durable insights with update_contact_profile and consolidate finished conversations with summarize_episode. Sends are rate-limited and may be in dry-run mode (check the response).",
       inputSchema: {
         chat: z.string().describe("Chat JID or phone number"),
         text: z.string().min(1).max(4096).describe("Message text, written in the user's voice for this contact"),

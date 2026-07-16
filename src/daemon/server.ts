@@ -16,6 +16,10 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "readMessages",
   "searchMessages",
   "searchContacts",
+  "recall",
+  "listEpisodes",
+  "readEpisode",
+  "summarizeEpisode",
   "groupInfo",
   "send",
   "getProfile",
@@ -117,6 +121,9 @@ export async function runDaemon(): Promise<void> {
   };
   process.on("SIGINT", () => void shutdown());
   process.on("SIGTERM", () => void shutdown());
+
+  const indexed = store.backfillVectors();
+  if (indexed > 0) console.log(`[wacon] memory index: vectorized ${indexed} messages`);
 
   await connection.start();
   console.log(`[wacon] whatsapp connection started (state: ${connection.state})`);

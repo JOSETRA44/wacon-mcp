@@ -1,5 +1,16 @@
 import type { MessageRow } from "../core/store.js";
 
+export interface RelationshipDynamics {
+  /** Median seconds the user takes to reply to this contact. */
+  medianReplySeconds: number | null;
+  /** Fraction of conversation episodes started by the user (0..1). */
+  initiationRatio: number | null;
+  /** Average consecutive messages the user sends per turn. */
+  avgBurstLength: number;
+  /** Messages per week over the analyzed window. */
+  messagesPerWeek: number;
+}
+
 export interface StyleStats {
   messageCount: number;
   avgMessageLength: number;
@@ -7,12 +18,21 @@ export interface StyleStats {
   laughterStyle: string | null;
   formality: "formal" | "neutral" | "casual";
   formalitySignals: { formal: number; casual: number };
+  /** Dominant address pronoun in Spanish: tú / usted / vos. */
+  pronounStyle: "tuteo" | "usted" | "voseo" | null;
+  /** Dominant language of the user's messages. */
+  language: "es" | "en" | "mixed" | null;
+  /** Fraction of messages using accent marks — many people never type tildes in chat. */
+  tildeUsage: number;
+  /** Chat abbreviations the user actually uses (xq, tqm, ntp...). */
+  abbreviations: string[];
   startsLowercaseRatio: number;
   exclamationRate: number;
   questionRate: number;
   usesFinalPunctuationRatio: number;
   topPhrases: { phrase: string; count: number }[];
   peakHours: number[];
+  dynamics: RelationshipDynamics | null;
   lastAnalyzedAt: string;
 }
 
@@ -41,12 +61,86 @@ function countMatches(texts: string[], re: RegExp): number {
   return n;
 }
 
+const TUTEO_RE = /\b(t[uú]|te|ti|contigo|tienes|quieres|puedes|sabes|eres|est[aá]s|vienes|haces)\b/gi;
+const USTED_RE = /\b(usted|le\b|su\b|tiene|quiere|puede|sabe(?!s)|est[aá](?!s)\b|viene(?!s)|d[ií]game|disculpe)\b/gi;
+const VOSEO_RE = /\b(vos|ten[eé]s|quer[eé]s|pod[eé]s|sab[eé]s|sos|and[aá]|dec[ií]me|mir[aá]\b)\b/gi;
+const ES_STOP_RE = /\b(que|de|la|el|en|los|para|por|con|una|pero|como|más|este|esta|hola|gracias|bueno|entonces|también)\b/gi;
+const EN_STOP_RE = /\b(the|and|for|you|that|with|this|have|what|just|about|okay|thanks|hello|because)\b/gi;
+const ACCENT_RE = /[áéíóúñü]/i;
+const ABBREVIATIONS = ["xq", "pq", "q", "tqm", "ntp", "tmb", "bn", "xfa", "km", "sdd", "grax", "d nada", "np", "idk", "btw", "lol"];
+
+function detectPronounStyle(texts: string[]): StyleStats["pronounStyle"] {
+  const tuteo = countMatches(texts, TUTEO_RE);
+  const usted = countMatches(texts, USTED_RE);
+  const voseo = countMatches(texts, VOSEO_RE);
+  const max = Math.max(tuteo, usted, voseo);
+  if (max < 3) return null;
+  // voseo markers are rarer but far more specific, so weigh them up
+  if (voseo * 3 >= max) return "voseo";
+  return tuteo >= usted ? "tuteo" : "usted";
+}
+
+function detectLanguage(texts: string[]): StyleStats["language"] {
+  const es = countMatches(texts, ES_STOP_RE);
+  const en = countMatches(texts, EN_STOP_RE);
+  if (es + en < 5) return null;
+  if (es > en * 3) return "es";
+  if (en > es * 3) return "en";
+  return "mixed";
+}
+
+/**
+ * Relationship dynamics need BOTH sides of the conversation (chronological).
+ * Computed separately from style because style uses only outgoing messages.
+ */
+export function analyzeDynamics(allMessages: { from_me: number; timestamp: number }[], episodeGapMs = 3 * 3600_000): RelationshipDynamics | null {
+  if (allMessages.length < 10) return null;
+  const chrono = allMessages.slice().sort((a, b) => a.timestamp - b.timestamp);
+
+  const replyDelays: number[] = [];
+  let episodeStarts = 0;
+  let episodeStartsByMe = 0;
+  let bursts = 0;
+  let burstMessages = 0;
+  let prev: { from_me: number; timestamp: number } | null = null;
+
+  for (const m of chrono) {
+    if (!prev || m.timestamp - prev.timestamp > episodeGapMs) {
+      episodeStarts++;
+      if (m.from_me) episodeStartsByMe++;
+    } else if (m.from_me && !prev.from_me) {
+      // the user replying to the contact within the same episode
+      replyDelays.push((m.timestamp - prev.timestamp) / 1000);
+    }
+    if (m.from_me) {
+      if (prev?.from_me && m.timestamp - prev.timestamp < 3 * 60_000) {
+        burstMessages++;
+      } else {
+        bursts++;
+        burstMessages++;
+      }
+    }
+    prev = m;
+  }
+
+  replyDelays.sort((a, b) => a - b);
+  const median = replyDelays.length > 0 ? replyDelays[Math.floor(replyDelays.length / 2)]! : null;
+  const spanWeeks = Math.max(1 / 7, (chrono[chrono.length - 1]!.timestamp - chrono[0]!.timestamp) / (7 * 24 * 3600_000));
+
+  return {
+    medianReplySeconds: median === null ? null : Math.round(median),
+    initiationRatio: episodeStarts === 0 ? null : Number((episodeStartsByMe / episodeStarts).toFixed(2)),
+    avgBurstLength: bursts === 0 ? 0 : Number((burstMessages / bursts).toFixed(1)),
+    messagesPerWeek: Number((chrono.length / spanWeeks).toFixed(1)),
+  };
+}
+
 /**
  * Deterministic style analysis over a set of the user's OUTGOING messages.
  * No LLM involved — this runs in milliseconds over thousands of messages,
  * which is what keeps per-contact memory cheap.
  */
-export function analyzeStyle(messages: MessageRow[]): StyleStats {
+export function analyzeStyle(messages: MessageRow[], dynamics: RelationshipDynamics | null = null): StyleStats {
   const texts = messages.map((m) => m.text ?? "").filter((t) => t.length > 0);
   const n = texts.length;
 
@@ -112,6 +206,11 @@ export function analyzeStyle(messages: MessageRow[]): StyleStats {
     .map((h) => h.hour)
     .sort((a, b) => a - b);
 
+  const withAccents = texts.filter((t) => ACCENT_RE.test(t)).length;
+  const usedAbbreviations = ABBREVIATIONS.filter((abbr) =>
+    texts.some((t) => new RegExp(`(?:^|\\s)${abbr}(?:\\s|$|[.,!?])`, "i").test(t))
+  );
+
   return {
     messageCount: n,
     avgMessageLength: n === 0 ? 0 : Math.round(texts.reduce((s, t) => s + t.length, 0) / n),
@@ -119,12 +218,17 @@ export function analyzeStyle(messages: MessageRow[]): StyleStats {
     laughterStyle: bestLaugh > 0 ? laughterStyle : null,
     formality,
     formalitySignals: { formal, casual: Math.round(casual) },
+    pronounStyle: detectPronounStyle(texts),
+    language: detectLanguage(texts),
+    tildeUsage: n === 0 ? 0 : Number((withAccents / n).toFixed(2)),
+    abbreviations: usedAbbreviations,
     startsLowercaseRatio: n === 0 ? 0 : Number((startsLower / n).toFixed(2)),
     exclamationRate: n === 0 ? 0 : Number((exclamations / n).toFixed(2)),
     questionRate: n === 0 ? 0 : Number((questions / n).toFixed(2)),
     usesFinalPunctuationRatio: n === 0 ? 0 : Number((endsWithPunct / n).toFixed(2)),
     topPhrases,
     peakHours,
+    dynamics,
     lastAnalyzedAt: new Date().toISOString(),
   };
 }
@@ -153,6 +257,32 @@ export function describeStyle(stats: StyleStats): string {
   );
   if (stats.topPhrases.length > 0) {
     parts.push(`Frases recurrentes: ${stats.topPhrases.slice(0, 5).map((p) => `"${p.phrase}"`).join(", ")}.`);
+  }
+  if (stats.pronounStyle) {
+    const label = { tuteo: "de tú", usted: "de usted", voseo: "de vos" }[stats.pronounStyle];
+    parts.push(`Trata a esta persona ${label}.`);
+  }
+  if (stats.language === "en") parts.push("Escribe principalmente en inglés en este chat.");
+  if (stats.language === "mixed") parts.push("Mezcla español e inglés (spanglish).");
+  if (stats.tildeUsage < 0.15 && stats.messageCount >= 20) parts.push("Casi nunca escribe tildes.");
+  if (stats.abbreviations.length > 0) parts.push(`Abreviaciones que usa: ${stats.abbreviations.join(", ")}.`);
+  if (stats.dynamics) {
+    const d = stats.dynamics;
+    if (d.medianReplySeconds !== null) {
+      const mins = Math.round(d.medianReplySeconds / 60);
+      parts.push(mins < 2 ? "Responde casi al instante." : `Suele responder en ~${mins} min.`);
+    }
+    if (d.initiationRatio !== null) {
+      // initiationRatio = fraction of episodes started by the USER
+      parts.push(
+        d.initiationRatio > 0.65
+          ? "El usuario suele iniciar las conversaciones."
+          : d.initiationRatio < 0.35
+            ? "Esta persona suele iniciar; el usuario responde."
+            : "La iniciativa está equilibrada."
+      );
+    }
+    if (d.avgBurstLength >= 2) parts.push(`Envía ~${d.avgBurstLength} mensajes seguidos por turno (mensajes cortos encadenados).`);
   }
   return parts.join(" ");
 }

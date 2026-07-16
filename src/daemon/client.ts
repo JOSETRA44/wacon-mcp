@@ -43,6 +43,18 @@ export class DaemonClient implements WaconApi {
   searchContacts(query: string, limit?: number): ReturnType<WaconApi["searchContacts"]> {
     return this.rpc("searchContacts", [query, limit]);
   }
+  recall(query: string, chat?: string, limit?: number): ReturnType<WaconApi["recall"]> {
+    return this.rpc("recall", [query, chat, limit]);
+  }
+  listEpisodes(chat: string, limit?: number): ReturnType<WaconApi["listEpisodes"]> {
+    return this.rpc("listEpisodes", [chat, limit]);
+  }
+  readEpisode(episodeId: number): ReturnType<WaconApi["readEpisode"]> {
+    return this.rpc("readEpisode", [episodeId]);
+  }
+  summarizeEpisode(episodeId: number, summary: string): ReturnType<WaconApi["summarizeEpisode"]> {
+    return this.rpc("summarizeEpisode", [episodeId, summary]);
+  }
   groupInfo(groupJid: string): ReturnType<WaconApi["groupInfo"]> {
     return this.rpc("groupInfo", [groupJid]);
   }

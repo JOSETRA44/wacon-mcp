@@ -2,7 +2,8 @@ import type { Store, MessageRow } from "./store.js";
 import type { WhatsAppConnection, ConnectionState } from "./connection.js";
 import { loadConfig } from "./config.js";
 import { checkSend } from "./guardrails.js";
-import { analyzeStyle, describeStyle, type StyleStats } from "../memory/analyzer.js";
+import { analyzeStyle, analyzeDynamics, describeStyle, type StyleStats } from "../memory/analyzer.js";
+import { recall, type RecallResult } from "../memory/recall.js";
 import { readProfile, writeProfileStats, appendObservation, type ProfileSection, type ContactProfile } from "../memory/profiles.js";
 import { readPersona, writePersonaStats } from "../memory/persona.js";
 
@@ -65,6 +66,30 @@ export class WaconService {
     return this.store.searchMessages(query, { chatJid: chatJid ? normalizeJid(chatJid) : undefined, limit });
   }
 
+  /** Hybrid memory retrieval: keyword (BM25) + semantic (hashed vectors) + recency, RRF-fused, plus matching episode summaries. */
+  recall(query: string, chatJid?: string, limit = 12): RecallResult {
+    return recall(this.store, query, { chatJid: chatJid ? normalizeJid(chatJid) : undefined, limit });
+  }
+
+  listEpisodes(chatJid: string, limit = 20) {
+    const jid = normalizeJid(chatJid);
+    this.store.rebuildEpisodes(jid);
+    return this.store.listEpisodes(jid, limit);
+  }
+
+  readEpisode(episodeId: number) {
+    const ep = this.store.getEpisode(episodeId);
+    if (!ep) throw new Error(`Episode ${episodeId} not found. Use list_episodes first.`);
+    return { episode: ep, messages: this.store.messagesInRange(ep.chat_jid, ep.start_ts, ep.end_ts) };
+  }
+
+  summarizeEpisode(episodeId: number, summary: string) {
+    const ep = this.store.getEpisode(episodeId);
+    if (!ep) throw new Error(`Episode ${episodeId} not found. Use list_episodes first.`);
+    this.store.setEpisodeSummary(episodeId, summary);
+    return { saved: true, episodeId };
+  }
+
   searchContacts(query: string, limit = 20) {
     return this.store.searchContacts(query, limit);
   }
@@ -115,7 +140,8 @@ export class WaconService {
     if (!profile || !profile.stats) {
       const outgoing = this.store.outgoingMessages(jid);
       if (outgoing.length >= 5) {
-        writeProfileStats(jid, this.store.resolveDisplayName(jid), analyzeStyle(outgoing));
+        const dynamics = analyzeDynamics(this.store.allMessages(jid));
+        writeProfileStats(jid, this.store.resolveDisplayName(jid), analyzeStyle(outgoing, dynamics));
         profile = readProfile(jid);
       }
     }
@@ -133,7 +159,7 @@ export class WaconService {
     if (outgoing.length === 0) {
       throw new Error(`No outgoing messages found for ${jid}. Sync more history or check the JID.`);
     }
-    const stats = analyzeStyle(outgoing);
+    const stats = analyzeStyle(outgoing, analyzeDynamics(this.store.allMessages(jid)));
     writeProfileStats(jid, this.store.resolveDisplayName(jid), stats);
     return { stats, summary: describeStyle(stats) };
   }
@@ -157,7 +183,9 @@ export class WaconService {
       if (chat.chat_jid.endsWith("@g.us")) continue; // group style differs per member; skip in bulk pass
       const outgoing = this.store.outgoingMessages(chat.chat_jid);
       if (outgoing.length < minOutgoing) continue;
-      writeProfileStats(chat.chat_jid, this.store.resolveDisplayName(chat.chat_jid), analyzeStyle(outgoing));
+      const dynamics = analyzeDynamics(this.store.allMessages(chat.chat_jid));
+      writeProfileStats(chat.chat_jid, this.store.resolveDisplayName(chat.chat_jid), analyzeStyle(outgoing, dynamics));
+      this.store.rebuildEpisodes(chat.chat_jid);
       profilesCreated.push(chat.chat_jid);
     }
     return { personaMessages: allOutgoing.length, profilesCreated };

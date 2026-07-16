@@ -47,19 +47,31 @@ humano (CLI) ─────────┘        │
                                └─► ~/.wacon/auth/         (credenciales de sesión)
 ```
 
-## Sistema de memoria
+## Sistema de memoria (3 capas)
 
 | Capa | Quién la escribe | Qué contiene |
 |---|---|---|
-| Stats (frontmatter YAML) | `analyze_contact` / `wacon init` — determinístico, sin LLM | emojis frecuentes, formalidad, estilo de risa, longitud, frases recurrentes, horarios |
+| Stats (frontmatter YAML) | `analyze_contact` / `wacon init` — determinístico, sin LLM | emojis, formalidad, **tuteo/usted/voseo**, idioma, uso de tildes, abreviaciones, estilo de risa, longitud, frases recurrentes, **dinámica** (latencia de respuesta, iniciativa, ráfagas) |
 | Notas cualitativas (cuerpo .md) | Agentes vía `update_contact_profile` (y tú, a mano) | dinámica de la relación, temas, bromas internas, qué evitar |
 | `persona.md` | `wacon init` + **tú** | tu voz global y reglas duras para los agentes |
 
-Flujo esperado de un agente antes de enviar: `get_contact_profile` → `read_messages` → redactar → `send_message` → `update_contact_profile`.
+### Recuperación híbrida (RAG local, sin modelos externos)
 
-## Herramientas MCP
+`recall_context` combina keyword (FTS5/BM25) + similitud semántica (vectores de n-gramas hasheados, robustos a typos: "q onda" ≈ "qué onda") + recencia, fusionados con RRF. Y **memoria episódica**: el historial se segmenta en conversaciones (>3h de silencio); los agentes las consolidan con `summarize_episode` y esos resúmenes emergen en recalls futuros. Wacon mejora con cada uso.
 
-`whatsapp_status`, `whatsapp_login` (QR como imagen), `list_chats`, `read_messages`, `search_messages` (full-text), `search_contacts`, `get_group_info`, `send_message`, `get_contact_profile`, `update_contact_profile`, `analyze_contact`, `get_persona`, `wacon_init` — más resources (`wacon://persona`, `wacon://profile/{chat}`) y el prompt `reply_in_style`.
+Flujo de un agente: `get_contact_profile` → `read_messages` → `recall_context` → redactar → `send_message` → `update_contact_profile` + `summarize_episode`.
+
+## Herramientas MCP (17)
+
+`whatsapp_status`, `whatsapp_login` (QR como imagen), `list_chats`, `read_messages`, `search_messages`, `recall_context` (híbrido), `list_episodes`, `read_episode`, `summarize_episode`, `search_contacts`, `get_group_info`, `send_message`, `get_contact_profile`, `update_contact_profile`, `analyze_contact`, `get_persona`, `wacon_init` — más resources (`wacon://persona`, `wacon://profile/{chat}`) y el prompt `reply_in_style`.
+
+## Skill para agentes
+
+En `skills/wacon-whatsapp/` hay una skill con el workflow completo. Instalación: `npx skills add <owner>/wacon-mcp` (cuando el repo esté en GitHub) o copia la carpeta a `~/.claude/skills/`.
+
+## Documentación de diseño
+
+`wacon-docs/` es un vault de Obsidian con el "cerebro" del proyecto: arquitectura, decisiones, sistema de memoria y roadmap, todo enlazado con wikilinks. Ábrelo como vault en Obsidian.
 
 ## Guardrails (`~/.wacon/config.json`)
 
