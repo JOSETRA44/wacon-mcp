@@ -6,8 +6,9 @@ tags: [wacon, skill]
 
 `skills/wacon-whatsapp/SKILL.md` — layout estándar instalable:
 
-- Con el CLI de skills: `npx skills add <owner>/wacon-mcp` una vez el repo esté en GitHub (el CLI detecta `skills/*/SKILL.md`)
+- Con el CLI de skills: `npx skills add JOSETRA44/wacon-mcp` (el CLI detecta `skills/*/SKILL.md`)
 - Manual: copiar `skills/wacon-whatsapp/` a `~/.claude/skills/`
+- La skill también se distribuye dentro del paquete npm (`files` incluye `skills/`)
 
 ## Qué aporta sobre los tools solos
 

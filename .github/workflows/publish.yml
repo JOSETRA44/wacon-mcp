@@ -1,0 +1,24 @@
+# Publishes to npm when you create a GitHub Release.
+# One-time setup: create an npm automation token (npmjs.com > Access Tokens >
+# Generate New Token > Automation) and save it as the repo secret NPM_TOKEN
+# (GitHub repo > Settings > Secrets and variables > Actions).
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

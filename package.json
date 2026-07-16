@@ -1,9 +1,29 @@
 {
   "name": "wacon",
   "version": "0.1.0",
-  "description": "WhatsApp AI CLI + MCP server — lets AI agents and humans manage WhatsApp with per-contact style memory",
+  "description": "WhatsApp AI CLI + MCP server — lets AI agents and humans manage WhatsApp with per-contact style memory, hybrid local RAG and episodic memory",
   "type": "module",
   "license": "MIT",
+  "author": "JOSETRA44",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JOSETRA44/wacon-mcp.git"
+  },
+  "homepage": "https://github.com/JOSETRA44/wacon-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/JOSETRA44/wacon-mcp/issues"
+  },
+  "keywords": [
+    "whatsapp",
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "baileys",
+    "cli",
+    "rag",
+    "memory",
+    "claude"
+  ],
   "engines": {
     "node": ">=20"
   },
@@ -11,13 +31,18 @@
     "wacon": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepare": "tsup",
+    "prepublishOnly": "npm run typecheck && npm test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

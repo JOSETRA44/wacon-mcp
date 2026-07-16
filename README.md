@@ -6,10 +6,29 @@ Wacon conecta tu WhatsApp con agentes de IA (Claude Code, o cualquier cliente MC
 
 ## Instalación
 
+**Desde npm** (recomendado, cuando esté publicado):
+
 ```bash
-npm install
-npm run build
-npm link        # deja el comando `wacon` disponible globalmente
+npm install -g wacon
+```
+
+**Directo desde GitHub** (sin esperar el registro — compila solo al instalar):
+
+```bash
+npm install -g github:JOSETRA44/wacon-mcp
+```
+
+**Sin instalar nada** (npx):
+
+```bash
+npx wacon login
+```
+
+**Desarrollo local**:
+
+```bash
+git clone https://github.com/JOSETRA44/wacon-mcp && cd wacon-mcp
+npm install && npm link
 ```
 
 ## Primeros pasos
@@ -26,6 +45,8 @@ Después de `wacon init`, **edita `~/.wacon/persona.md` a mano**. Es la fuente d
 
 ```bash
 claude mcp add wacon -- wacon mcp
+# o sin instalación global:
+claude mcp add wacon -- npx -y wacon mcp
 ```
 
 Cualquier otro cliente MCP local puede conectarse de dos formas:
@@ -67,7 +88,7 @@ Flujo de un agente: `get_contact_profile` → `read_messages` → `recall_contex
 
 ## Skill para agentes
 
-En `skills/wacon-whatsapp/` hay una skill con el workflow completo. Instalación: `npx skills add <owner>/wacon-mcp` (cuando el repo esté en GitHub) o copia la carpeta a `~/.claude/skills/`.
+En `skills/wacon-whatsapp/` hay una skill con el workflow completo. Instalación: `npx skills add JOSETRA44/wacon-mcp` o copia la carpeta a `~/.claude/skills/`. La skill también viaja dentro del paquete npm (`node_modules/wacon/skills/`).
 
 ## Documentación de diseño
 
