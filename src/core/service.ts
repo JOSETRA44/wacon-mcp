@@ -2,6 +2,8 @@ import type { Store, MessageRow } from "./store.js";
 import type { WhatsAppConnection, ConnectionState } from "./connection.js";
 import { loadConfig } from "./config.js";
 import { checkSend } from "./guardrails.js";
+import { WatchRegistry, MAX_WATCH_MINUTES, type WatchRule, type WatchSession, type WatchEvent } from "./watch.js";
+import { suggestWatchWindow, type WatchWindowSuggestion } from "./activity.js";
 import { analyzeStyle, analyzeDynamics, describeStyle, type StyleStats } from "../memory/analyzer.js";
 import { recall, type RecallResult } from "../memory/recall.js";
 import { readProfile, writeProfileStats, appendObservation, type ProfileSection, type ContactProfile } from "../memory/profiles.js";
@@ -10,7 +12,35 @@ import { readPersona, writePersonaStats } from "../memory/persona.js";
 export interface StatusInfo {
   state: ConnectionState;
   selfJid: string | null;
+  presence: string;
+  activeWatches: number;
+  cursor: number;
   stats: { chats: number; contacts: number; messages: number; outgoing: number };
+}
+
+export interface WaitResult {
+  events: {
+    seq: number;
+    chat: string;
+    chatName: string | null;
+    from: string | null;
+    at: string;
+    text: string | null;
+    type: string;
+    priority: number;
+    reasons: string[];
+  }[];
+  cursor: number;
+  timedOut: boolean;
+}
+
+export interface DigestEntry {
+  chat: string;
+  name: string | null;
+  isGroup: boolean;
+  incoming: number;
+  lastAt: string;
+  preview: string | null;
 }
 
 export interface SendResult {
@@ -33,15 +63,24 @@ export function normalizeJid(input: string): string {
  * over HTTP; MCP tools and CLI commands are thin adapters over them.
  */
 export class WaconService {
+  readonly watch: WatchRegistry;
+
   constructor(
     private store: Store,
     private connection: WhatsAppConnection
-  ) {}
+  ) {
+    this.watch = new WatchRegistry(store);
+    // The connection stays unaware of attention concerns; the service wires them.
+    this.connection.on("message", (msg) => this.watch.ingest(msg, this.connection.selfJid));
+  }
 
   status(): StatusInfo {
     return {
       state: this.connection.state,
       selfJid: this.connection.selfJid,
+      presence: this.connection.presence,
+      activeWatches: this.watch.activeSessions().length,
+      cursor: this.watch.cursor,
       stats: this.store.stats(),
     };
   }
@@ -108,7 +147,7 @@ export class WaconService {
     };
   }
 
-  async send(chatJidOrPhone: string, text: string, clientName: string): Promise<SendResult> {
+  async send(chatJidOrPhone: string, text: string, clientName: string, typingMs = 0): Promise<SendResult> {
     const chatJid = normalizeJid(chatJidOrPhone);
     const config = loadConfig();
     const check = checkSend(config, this.store, chatJid);
@@ -119,9 +158,92 @@ export class WaconService {
       this.store.logSent({ chatJid, text, clientName, dryRun: true });
       return { sent: false, dryRun: true, messageId: null, reason: "dryRun is enabled in config.json — message logged but NOT sent" };
     }
-    const { id } = await this.connection.sendText(chatJid, text);
+    const { id } = await this.connection.sendText(chatJid, text, typingMs);
     this.store.logSent({ chatJid, text, clientName, dryRun: false });
     return { sent: true, dryRun: false, messageId: id };
+  }
+
+  // ── attention control ────────────────────────────────────
+
+  startWatch(rule: Partial<WatchRule>, durationMinutes: number, clientName: string): WatchSession {
+    return this.watch.start(rule, durationMinutes, clientName);
+  }
+
+  stopWatch(sessionId?: string): { stopped: number } {
+    return { stopped: this.watch.stop(sessionId) };
+  }
+
+  watchStatus(): { sessions: (WatchSession & { minutesLeft: number })[]; cursor: number } {
+    const now = Date.now();
+    return {
+      sessions: this.watch.activeSessions().map((s) => ({ ...s, minutesLeft: Math.round((s.expiresAt - now) / 60_000) })),
+      cursor: this.watch.cursor,
+    };
+  }
+
+  /**
+   * Blocks until a matching message arrives or the timeout expires. One call
+   * here replaces an entire polling loop — the daemon does the waiting for free.
+   */
+  async waitForMessages(opts: { since?: number; sessionId?: string; timeoutSeconds?: number }): Promise<WaitResult> {
+    const timeoutMs = Math.min(Math.max(opts.timeoutSeconds ?? 60, 1), 120) * 1000;
+    const events = await this.watch.wait({ since: opts.since, sessionId: opts.sessionId ?? null, timeoutMs });
+    return {
+      events: events.map((e: WatchEvent) => ({
+        seq: e.seq,
+        chat: e.message.chat_jid,
+        chatName: e.chatName,
+        from: e.message.sender_jid,
+        at: new Date(e.message.timestamp).toISOString(),
+        text: e.message.text,
+        type: e.message.message_type,
+        priority: e.priority,
+        reasons: e.reasons,
+      })),
+      cursor: events.length > 0 ? events[events.length - 1]!.seq : (opts.since ?? this.watch.cursor),
+      timedOut: events.length === 0,
+    };
+  }
+
+  suggestWatchWindow(chatJid?: string): WatchWindowSuggestion & { maxWatchMinutes: number } {
+    return {
+      ...suggestWatchWindow(this.store, chatJid ? normalizeJid(chatJid) : undefined),
+      maxWatchMinutes: MAX_WATCH_MINUTES,
+    };
+  }
+
+  /** Compact catch-up so an agent doesn't have to read every chat to know what changed. */
+  digest(sinceMinutes = 60, limit = 40): { since: string; chats: DigestEntry[]; totalIncoming: number } {
+    const sinceTs = Date.now() - sinceMinutes * 60_000;
+    const rows = this.store.digestSince(sinceTs, limit);
+    return {
+      since: new Date(sinceTs).toISOString(),
+      totalIncoming: rows.reduce((s, r) => s + r.incoming, 0),
+      chats: rows.map((r) => ({
+        chat: r.chat_jid,
+        name: r.display_name,
+        isGroup: !!r.is_group,
+        incoming: r.incoming,
+        lastAt: new Date(r.last_ts).toISOString(),
+        preview: r.last_text ? r.last_text.slice(0, 120) : null,
+      })),
+    };
+  }
+
+  async setPresence(presence: "available" | "unavailable" | "composing" | "recording" | "paused", chatJid?: string): Promise<{ presence: string }> {
+    await this.connection.setPresence(presence, chatJid ? normalizeJid(chatJid) : undefined);
+    return { presence };
+  }
+
+  async markRead(chatJidOrPhone: string, limit = 20): Promise<{ marked: number }> {
+    const chatJid = normalizeJid(chatJidOrPhone);
+    const unread = this.store
+      .readMessages(chatJid, limit)
+      .filter((m) => !m.from_me)
+      .map((m) => ({ id: m.id, participant: chatJid.endsWith("@g.us") ? m.sender_jid : null }));
+    if (unread.length === 0) return { marked: 0 };
+    await this.connection.markRead(chatJid, unread);
+    return { marked: unread.length };
   }
 
   async logout(): Promise<void> {

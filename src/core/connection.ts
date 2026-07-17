@@ -9,6 +9,7 @@ import makeWASocket, {
   type WASocket,
   type WAMessage,
   type GroupMetadata,
+  type WAPresence,
 } from "@whiskeysockets/baileys";
 import { EventEmitter } from "node:events";
 import { rmSync } from "node:fs";
@@ -194,12 +195,51 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
     };
   }
 
-  async sendText(chatJid: string, text: string): Promise<{ id: string | null }> {
+  private requireSocket(): WASocket {
     if (!this.socket || this.state !== "connected") {
       throw new Error(`Not connected to WhatsApp (state: ${this.state}). Run login first.`);
     }
-    const result = await this.socket.sendMessage(chatJid, { text });
+    return this.socket;
+  }
+
+  /**
+   * @param typingMs simulate typing for this long before sending. Real people
+   *   don't reply instantly with a paragraph; the contact sees "escribiendo...".
+   */
+  async sendText(chatJid: string, text: string, typingMs = 0): Promise<{ id: string | null }> {
+    const socket = this.requireSocket();
+    if (typingMs > 0) {
+      await socket.sendPresenceUpdate("composing", chatJid);
+      await new Promise((r) => setTimeout(r, Math.min(typingMs, 15_000)));
+      await socket.sendPresenceUpdate("paused", chatJid);
+    }
+    const result = await socket.sendMessage(chatJid, { text });
     return { id: result?.key?.id ?? null };
+  }
+
+  /**
+   * Controls whether the user appears online to their contacts.
+   * 'unavailable' is stealth mode: Wacon keeps receiving everything while the
+   * account looks offline — nobody sees "en línea" at 3am because an agent woke up.
+   */
+  async setPresence(presence: WAPresence, chatJid?: string): Promise<void> {
+    await this.requireSocket().sendPresenceUpdate(presence, chatJid);
+    if (!chatJid) this.presence = presence;
+  }
+
+  presence: WAPresence = "unavailable";
+
+  /** Explicit blue ticks. Reading via Wacon does NOT mark as read unless asked. */
+  async markRead(chatJid: string, messages: { id: string; participant?: string | null }[]): Promise<void> {
+    const socket = this.requireSocket();
+    await socket.readMessages(
+      messages.map((m) => ({
+        remoteJid: chatJid,
+        id: m.id,
+        participant: m.participant ?? undefined,
+        fromMe: false,
+      }))
+    );
   }
 
   async groupMetadata(groupJid: string): Promise<GroupMetadata> {

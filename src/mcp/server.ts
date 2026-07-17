@@ -3,6 +3,7 @@ import { z } from "zod";
 import QRCode from "qrcode";
 import type { WaconApi } from "./api.js";
 import { PROFILE_SECTIONS } from "../memory/profiles.js";
+import { MAX_WATCH_MINUTES } from "../core/watch.js";
 
 function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -260,9 +261,132 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
       inputSchema: {
         chat: z.string().describe("Chat JID or phone number"),
         text: z.string().min(1).max(4096).describe("Message text, written in the user's voice for this contact"),
+        typing_ms: z
+          .number()
+          .int()
+          .min(0)
+          .max(15000)
+          .default(0)
+          .describe("Show 'escribiendo…' for this long before sending. Real people don't reply instantly with a paragraph — a value near (text length × 40ms) reads as human."),
       },
     },
-    async ({ chat, text }) => json(await api.send(chat, text, clientLabel))
+    async ({ chat, text, typing_ms }) => json(await api.send(chat, text, clientLabel, typing_ms))
+  );
+
+  // ── attention control (token efficiency) ─────────────────
+
+  server.registerTool(
+    "wait_for_messages",
+    {
+      title: "Block until new messages arrive",
+      description:
+        "Wait efficiently for incoming messages instead of polling. The daemon blocks server-side and returns the moment a message arrives (or when the timeout expires) — one call replaces an entire poll loop and costs a fraction of the tokens. Returns each message already triaged with a priority score (0-100) and the reasons behind it. Pass the returned `cursor` as `since` on your next call to resume exactly where you left off without missing or repeating events. Combine with start_watch to only be woken for messages that actually matter.",
+      inputSchema: {
+        timeout_seconds: z.number().int().min(1).max(120).default(60).describe("How long to block. Max 120s; call again in a loop for longer vigils."),
+        since: z.number().int().optional().describe("Cursor from a previous wait_for_messages/watch_status call. Omit to only get messages from now on."),
+        session_id: z.string().optional().describe("Watch session id from start_watch — applies its filters to this wait."),
+      },
+    },
+    async ({ timeout_seconds, since, session_id }) =>
+      json(await api.waitForMessages({ timeoutSeconds: timeout_seconds, since, sessionId: session_id }))
+  );
+
+  server.registerTool(
+    "start_watch",
+    {
+      title: "Register what deserves your attention",
+      description:
+        "Declare a filter so the daemon only wakes you (via wait_for_messages) for messages that matter, evaluating rules for free instead of spending your tokens on noise. Filter by chats, keywords, groups, and a minimum priority score. Priority is computed deterministically: direct chats and group messages that mention the user score high; frequent contacts, replies and questions add points. A watch expires on its own after duration_minutes (max 240) so a crashed agent can never leave the daemon busy forever. Use suggest_watch_window first to pick a sensible duration.",
+      inputSchema: {
+        duration_minutes: z.number().int().min(1).max(MAX_WATCH_MINUTES).default(30),
+        chats: z.array(z.string()).default([]).describe("Only these chat JIDs. Empty = any chat."),
+        exclude_chats: z.array(z.string()).default([]).describe("Never wake for these chats"),
+        keywords: z.array(z.string()).default([]).describe("Only wake if the text contains one of these (accent/case-insensitive)"),
+        include_groups: z.boolean().default(false).describe("Groups are noisy; off by default"),
+        min_priority: z.number().int().min(0).max(100).default(0).describe("Wake only above this priority. 40+ ≈ direct chats only; 60+ ≈ important only."),
+      },
+    },
+    async ({ duration_minutes, chats, exclude_chats, keywords, include_groups, min_priority }) =>
+      json(
+        await api.startWatch(
+          { chats, excludeChats: exclude_chats, keywords, includeGroups: include_groups, minPriority: min_priority },
+          duration_minutes,
+          clientLabel
+        )
+      )
+  );
+
+  server.registerTool(
+    "stop_watch",
+    {
+      title: "End a watch session",
+      description: "Stop one watch session (or all of them if no id is given). Good hygiene when you finish a vigil early.",
+      inputSchema: { session_id: z.string().optional().describe("Omit to stop every active watch") },
+    },
+    async ({ session_id }) => json(await api.stopWatch(session_id))
+  );
+
+  server.registerTool(
+    "watch_status",
+    {
+      title: "Active watches and current cursor",
+      description: "List active watch sessions with their filters and minutes left, plus the current event cursor. Use the cursor as `since` in wait_for_messages to catch anything that arrives from this instant on.",
+      inputSchema: {},
+    },
+    async () => json(await api.watchStatus())
+  );
+
+  server.registerTool(
+    "suggest_watch_window",
+    {
+      title: "How long is it worth staying online?",
+      description:
+        "Answers 'should I wait here, and for how long?' from real history instead of guessing. Models message arrivals as a Poisson process using the last 8 weeks of this weekday+hour slot, and returns a recommended watch duration, the expected message count, a 12-hour forecast, and the next busy window. A recommendation of 0 minutes means the slot is dead and waiting would burn tokens for nothing — check back later instead. Call this before start_watch.",
+      inputSchema: { chat: z.string().optional().describe("Predict for one chat only. Omit for all inbound traffic.") },
+    },
+    async ({ chat }) => json(await api.suggestWatchWindow(chat))
+  );
+
+  server.registerTool(
+    "get_digest",
+    {
+      title: "Compact catch-up",
+      description:
+        "What arrived recently, grouped per chat: counts, last timestamp and a short preview — instead of dumping every message. Use this to catch up after being away (or at the start of a session) and then read in full only the chats worth it. Far cheaper than list_chats + read_messages across the board.",
+      inputSchema: {
+        since_minutes: z.number().int().min(1).max(10080).default(60).describe("Look back this many minutes (max 1 week)"),
+        limit: z.number().int().min(1).max(100).default(40),
+      },
+    },
+    async ({ since_minutes, limit }) => json(await api.digest(since_minutes, limit))
+  );
+
+  server.registerTool(
+    "set_presence",
+    {
+      title: "Go online or stealth",
+      description:
+        "Control whether the user appears online to their contacts. 'unavailable' is stealth mode (the default): Wacon keeps receiving everything while the account looks offline — nobody sees 'en línea' at 3am just because an agent woke up. Use 'available' when the user genuinely wants to appear present, e.g. before an active conversation. 'composing' shows 'escribiendo…' in a specific chat.",
+      inputSchema: {
+        presence: z.enum(["available", "unavailable", "composing", "recording", "paused"]),
+        chat: z.string().optional().describe("Required for composing/recording/paused; those are per-chat"),
+      },
+    },
+    async ({ presence, chat }) => json(await api.setPresence(presence, chat))
+  );
+
+  server.registerTool(
+    "mark_read",
+    {
+      title: "Send blue ticks",
+      description:
+        "Explicitly mark a chat's recent incoming messages as read. Reading through Wacon does NOT mark anything as read by itself — that's deliberate, so an agent scanning chats doesn't tell everyone the user saw their message. Use this only when the user is genuinely handling that conversation.",
+      inputSchema: {
+        chat: z.string().describe("Chat JID or phone number"),
+        limit: z.number().int().min(1).max(50).default(20),
+      },
+    },
+    async ({ chat, limit }) => json(await api.markRead(chat, limit))
   );
 
   // ── memory ───────────────────────────────────────────────

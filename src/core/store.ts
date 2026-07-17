@@ -434,6 +434,77 @@ export class Store {
       .all(chatJid, limit) as MessageRow[];
   }
 
+  // ── attention & activity ─────────────────────────────────
+
+  /** Chats the user engages with most — the basis for VIP triage. */
+  topChats(limit = 15): { chat_jid: string; total: number }[] {
+    return this.db
+      .prepare(
+        `SELECT chat_jid, COUNT(*) AS total FROM messages
+         WHERE chat_jid NOT LIKE '%@g.us'
+         GROUP BY chat_jid ORDER BY total DESC LIMIT ?`
+      )
+      .all(limit) as { chat_jid: string; total: number }[];
+  }
+
+  /**
+   * Inbound-message counts per (weekday, hour) over a recent window.
+   * Feeds the "is it worth staying online right now?" prediction.
+   */
+  inboundActivityHistogram(windowDays = 56, chatJid?: string): { dow: number; hour: number; count: number }[] {
+    const since = Date.now() - windowDays * 24 * 3600_000;
+    const filter = chatJid ? "AND chat_jid = ?" : "";
+    const args: (number | string)[] = chatJid ? [since, chatJid] : [since];
+    // SQLite strftime works on seconds; timestamps are ms. '%w'=weekday, '%H'=hour, localtime
+    return this.db
+      .prepare(
+        `SELECT CAST(strftime('%w', timestamp / 1000, 'unixepoch', 'localtime') AS INTEGER) AS dow,
+                CAST(strftime('%H', timestamp / 1000, 'unixepoch', 'localtime') AS INTEGER) AS hour,
+                COUNT(*) AS count
+         FROM messages
+         WHERE from_me = 0 AND timestamp >= ? ${filter}
+         GROUP BY dow, hour`
+      )
+      .all(...args) as { dow: number; hour: number; count: number }[];
+  }
+
+  /** Compact catch-up: what arrived per chat since a timestamp. */
+  digestSince(sinceTs: number, limit = 40): {
+    chat_jid: string;
+    display_name: string | null;
+    is_group: number;
+    incoming: number;
+    last_ts: number;
+    last_text: string | null;
+  }[] {
+    return this.db
+      .prepare(
+        `SELECT m.chat_jid,
+                COALESCE(c.name, ct.name, ct.notify_name) AS display_name,
+                COALESCE(c.is_group, 0) AS is_group,
+                COUNT(*) AS incoming,
+                MAX(m.timestamp) AS last_ts,
+                (SELECT text FROM messages m2
+                  WHERE m2.chat_jid = m.chat_jid AND m2.from_me = 0
+                  ORDER BY m2.timestamp DESC LIMIT 1) AS last_text
+         FROM messages m
+         LEFT JOIN chats c ON c.jid = m.chat_jid
+         LEFT JOIN contacts ct ON ct.jid = m.chat_jid
+         WHERE m.from_me = 0 AND m.timestamp > ?
+         GROUP BY m.chat_jid
+         ORDER BY last_ts DESC
+         LIMIT ?`
+      )
+      .all(sinceTs, limit) as {
+      chat_jid: string;
+      display_name: string | null;
+      is_group: number;
+      incoming: number;
+      last_ts: number;
+      last_text: string | null;
+    }[];
+  }
+
   // ── sent log ─────────────────────────────────────────────
 
   logSent(entry: { chatJid: string; text: string; clientName: string; dryRun: boolean }): void {

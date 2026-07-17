@@ -5,10 +5,11 @@ description: >
   recall past conversations, and send messages that authentically imitate how the
   user talks to EACH specific person. Use this skill whenever the user asks anything
   involving WhatsApp — "responde a mi mamá", "qué me han escrito", "avísale a Juan que
-  llego tarde", "resume mis chats", "busca qué quedamos del viaje" — or whenever a
-  task requires messaging a real person on the user's behalf, even if WhatsApp is not
-  named explicitly. Also use it to maintain Wacon's memory (profiles, episodes,
-  persona) after conversations.
+  llego tarde", "resume mis chats", "busca qué quedamos del viaje", "avísame si
+  escribe X" — or whenever a task requires messaging or monitoring a real person on
+  the user's behalf, even if WhatsApp is not named explicitly. Also use it to watch
+  for incoming messages without burning tokens on polling, and to maintain Wacon's
+  memory (profiles, episodes, persona) after conversations.
 ---
 
 # Wacon — WhatsApp con la voz del usuario
@@ -71,9 +72,42 @@ Esto es lo que hace a Wacon mejor con cada uso. Dedica 30 segundos:
 
 ## Lectura y análisis sin enviar
 
-Para "qué me han escrito", "resume mis grupos", "busca X": usa `list_chats`,
-`read_messages`, `search_messages` (keyword exacto) / `recall_context`
-(semántico), `get_group_info`. No hace falta perfil si no vas a enviar.
+Para "qué me han escrito", "resume mis grupos", "busca X": empieza por
+`get_digest` (catch-up comprimido de una llamada) y baja a `read_messages` solo
+en los chats que lo valgan. `search_messages` para keyword exacto,
+`recall_context` para semántico, `get_group_info` para grupos. No hace falta
+perfil si no vas a enviar.
+
+Leer no marca como leído: si el usuario está de verdad atendiendo ese chat, usa
+`mark_read` explícitamente.
+
+## Vigilar sin quemar tokens
+
+Si el usuario pide "avísame cuando escriba X" o "está pendiente de mi WhatsApp",
+**nunca hagas polling** (`list_chats` en bucle gasta ~100k tokens por hora para
+saber que no pasó nada). El daemon espera por ti gratis:
+
+1. **`suggest_watch_window`** — decide si vale la pena. Usa el historial real
+   (modelo de Poisson sobre 8 semanas de esa franja). Si recomienda 0 minutos,
+   la franja está muerta: dilo y propón revisar más tarde con `get_digest` o en
+   la ventana activa que te señala. Esperar ahí sería quemar tokens del usuario.
+2. **`start_watch`** — declara qué merece despertarte: chats, keywords, grupos
+   sí/no y `min_priority`. El triaje es determinístico y gratuito (chat directo
+   +40, te mencionan en grupo +45, contacto frecuente +20, pregunta +10). Con
+   `min_priority: 40` solo te despiertan chats directos; con 60+, solo lo
+   importante. Usa la duración que sugirió el paso 1.
+3. **`wait_for_messages`** — bloquea hasta que llegue algo o expire (máx 120s).
+   Pasa el `cursor` que devuelve como `since` en la siguiente llamada: así no
+   pierdes ni repites nada. Repite en bucle mientras dure la vigilancia.
+4. **`stop_watch`** al terminar.
+
+## Presencia: aparecer o no
+
+Por defecto la cuenta está en `unavailable` (sigilo): Wacon recibe todo mientras
+el usuario aparece desconectado. Ponla en `available` solo cuando vaya a
+conversar de verdad — nadie quiere aparecer "en línea" a las 3am porque un
+agente despertó. Al enviar, `typing_ms` muestra "escribiendo…" antes: nadie
+responde un párrafo en 200ms, y calibrarlo a ~40ms por carácter se lee humano.
 
 ## Mantenimiento
 

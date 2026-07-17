@@ -16,7 +16,8 @@ Wacon es un CLI + servidor MCP que conecta WhatsApp con agentes de IA, con **mem
 - [[RAG-Hibrido]] — retrieval sin modelos externos
 - [[Episodios]] — memoria episódica consolidada por agentes
 - [[Analyzer]] — análisis determinístico del lenguaje
-- [[Herramientas-MCP]] — los 17 tools + resources + prompt
+- [[Atencion-y-Tokens]] — long-poll, triaje y predicción de actividad
+- [[Herramientas-MCP]] — los 25 tools + resources + prompt
 - [[Guardrails-y-Seguridad]]
 - [[Skill-para-Agentes]] — la skill instalable
 - [[Roadmap]]
@@ -25,4 +26,6 @@ Wacon es un CLI + servidor MCP que conecta WhatsApp con agentes de IA, con **mem
 
 - v0.1.0 funcional, sesión real vinculada, historial sincronizando
 - Memoria v2 (RAG híbrido + episodios + analyzer v2) integrada
-- 11 tests en verde; typecheck estricto limpio
+- [[Atencion-y-Tokens|Atención v1]]: long-poll verificado, triaje determinístico, predicción Poisson
+- 25 tests en verde; typecheck estricto limpio
+- Empaquetado: instalable por npm / GitHub / npx

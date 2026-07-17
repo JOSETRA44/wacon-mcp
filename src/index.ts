@@ -64,6 +64,8 @@ program
       const stateColor = s.state === "connected" ? pc.green : s.state === "waiting_qr" ? pc.yellow : pc.red;
       console.log(`state:     ${stateColor(s.state)}`);
       console.log(`account:   ${s.selfJid ?? "—"}`);
+      console.log(`presence:  ${s.presence === "available" ? pc.green("available") : pc.dim(`${s.presence} (sigilo)`)}`);
+      console.log(`watches:   ${s.activeWatches} activas`);
       console.log(`chats:     ${s.stats.chats}`);
       console.log(`contacts:  ${s.stats.contacts}`);
       console.log(`messages:  ${s.stats.messages} (${s.stats.outgoing} sent by you)`);
@@ -167,6 +169,92 @@ program
         console.log(`${pc.bold(c.name ?? c.notify_name ?? "(sin nombre)")} ${c.is_group ? pc.magenta("[grupo]") : ""} ${pc.dim(c.jid)}`);
       }
       if (rows.length === 0) console.log(pc.dim("no matches"));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("watch")
+  .description("Live-watch incoming messages in the terminal (triaged by priority)")
+  .option("-m, --minutes <n>", "how long to watch", "30")
+  .option("-p, --min-priority <n>", "only show messages above this score (0-100)", "0")
+  .option("-g, --groups", "include group chats", false)
+  .option("-k, --keyword <words...>", "only messages containing these words")
+  .action(async (opts: { minutes: string; minPriority: string; groups: boolean; keyword?: string[] }) => {
+    try {
+      const session = await client.startWatch(
+        {
+          includeGroups: opts.groups,
+          minPriority: Number(opts.minPriority),
+          keywords: opts.keyword ?? [],
+        },
+        Number(opts.minutes),
+        "cli"
+      );
+      const until = new Date(session.expiresAt).toLocaleTimeString();
+      console.log(pc.cyan(`Watching until ${until} (Ctrl+C to stop)...`));
+      let cursor: number | undefined;
+      while (Date.now() < session.expiresAt) {
+        const result = await client.waitForMessages({ since: cursor, sessionId: session.id, timeoutSeconds: 60 });
+        cursor = result.cursor;
+        for (const e of result.events) {
+          const tag = e.priority >= 60 ? pc.red(`[${e.priority}]`) : e.priority >= 40 ? pc.yellow(`[${e.priority}]`) : pc.dim(`[${e.priority}]`);
+          console.log(`${pc.dim(fmtTime(e.at))} ${tag} ${pc.bold(e.chatName ?? e.chat)}: ${e.text ?? pc.dim(`(${e.type})`)}`);
+          console.log(pc.dim(`     ${e.reasons.join(", ")}`));
+        }
+      }
+      await client.stopWatch(session.id);
+      console.log(pc.dim("watch ended"));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("digest")
+  .description("Compact catch-up: what arrived per chat")
+  .option("-m, --minutes <n>", "look back this many minutes", "60")
+  .action(async (opts: { minutes: string }) => {
+    try {
+      const d = await client.digest(Number(opts.minutes));
+      console.log(pc.bold(`${d.totalIncoming} mensajes entrantes desde ${fmtTime(d.since)}\n`));
+      for (const c of d.chats) {
+        console.log(`${pc.bold(c.name ?? c.chat)} ${c.isGroup ? pc.magenta("[grupo]") : ""} ${pc.yellow(`×${c.incoming}`)}`);
+        if (c.preview) console.log(pc.dim(`  ${c.preview}`));
+      }
+      if (d.chats.length === 0) console.log(pc.dim("nada nuevo"));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("window")
+  .description("Should I stay online, and for how long? (predicted from your history)")
+  .option("-c, --chat <jid>", "predict for one chat only")
+  .action(async (opts: { chat?: string }) => {
+    try {
+      const w = await client.suggestWatchWindow(opts.chat);
+      const color = w.now.level === "busy" ? pc.green : w.now.level === "dead" ? pc.red : pc.yellow;
+      console.log(`ahora:        ${color(w.now.level)} (~${w.now.expectedPerHour} msg/h)`);
+      console.log(`recomendado:  ${w.recommendedMinutes > 0 ? pc.bold(`${w.recommendedMinutes} min`) : pc.red("no vigilar ahora")}`);
+      console.log(`esperados:    ~${w.expectedMessagesInWindow} mensajes`);
+      console.log(pc.dim(`\n${w.rationale}`));
+      console.log(pc.dim(`\npróximas horas: ${w.forecast.map((f) => `${f.hour}h:${f.expectedPerHour}`).join("  ")}`));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("presence <mode>")
+  .description("Appear online or stealth: available | unavailable")
+  .action(async (mode: string) => {
+    try {
+      if (!["available", "unavailable"].includes(mode)) die("mode must be 'available' or 'unavailable'");
+      const r = await client.setPresence(mode as "available" | "unavailable");
+      console.log(pc.green(`presence: ${r.presence}`));
     } catch (err) {
       die(err);
     }

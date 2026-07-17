@@ -82,9 +82,25 @@ humano (CLI) ─────────┘        │
 
 Flujo de un agente: `get_contact_profile` → `read_messages` → `recall_context` → redactar → `send_message` → `update_contact_profile` + `summarize_episode`.
 
-## Herramientas MCP (17)
+## Atención y ahorro de tokens
 
-`whatsapp_status`, `whatsapp_login` (QR como imagen), `list_chats`, `read_messages`, `search_messages`, `recall_context` (híbrido), `list_episodes`, `read_episode`, `summarize_episode`, `search_contacts`, `get_group_info`, `send_message`, `get_contact_profile`, `update_contact_profile`, `analyze_contact`, `get_persona`, `wacon_init` — más resources (`wacon://persona`, `wacon://profile/{chat}`) y el prompt `reply_in_style`.
+Un agente que hace polling (`list_chats` cada 30s) gasta ~100k tokens por hora para aprender "no pasó nada". Wacon invierte eso: **el daemon espera y filtra gratis**.
+
+- **`wait_for_messages`** — long-poll: bloquea server-side y responde en el instante en que llega un mensaje (o al expirar, máx 120s). La misma hora de vigilancia ≈ 2.4k tokens (~40× menos). Un `cursor` monotónico garantiza no perder ni repetir eventos.
+- **`start_watch`** — reglas declarativas (chats, keywords, grupos, prioridad mínima) + **triaje determinístico sin LLM**: cada mensaje recibe un score 0-100 (chat directo +40, te mencionan +45, contacto frecuente +20, pregunta +10…). Solo te despiertan los que importan. Expiran solas (máx 240 min).
+- **`suggest_watch_window`** — "¿vale la pena esperar aquí?" respondido con un modelo de Poisson sobre 8 semanas de tu historial. Si la franja está muerta recomienda **0 minutos** y señala la próxima ventana activa.
+- **`get_digest`** — catch-up comprimido por chat en una sola llamada.
+- **`set_presence`** — `unavailable` (default) es **modo sigilo**: recibes todo mientras apareces desconectado. Nadie ve "en línea" a las 3am porque un agente despertó. Leer nunca marca como leído: los tics azules exigen `mark_read` explícito.
+
+## Herramientas MCP (25)
+
+**Sesión**: `whatsapp_status`, `whatsapp_login` (QR como imagen)
+**Lectura**: `list_chats`, `read_messages`, `search_messages`, `recall_context` (híbrido), `search_contacts`, `get_group_info`
+**Atención**: `wait_for_messages`, `start_watch`, `stop_watch`, `watch_status`, `suggest_watch_window`, `get_digest`, `set_presence`, `mark_read`
+**Memoria**: `get_contact_profile`, `update_contact_profile`, `analyze_contact`, `get_persona`, `list_episodes`, `read_episode`, `summarize_episode`, `wacon_init`
+**Envío**: `send_message` (con `typing_ms` para simular "escribiendo…")
+
+Más resources (`wacon://persona`, `wacon://profile/{chat}`) y el prompt `reply_in_style`.
 
 ## Skill para agentes
 
@@ -111,11 +127,14 @@ Recomendado para las primeras pruebas: `"dryRun": true`, o `allowedChats` con so
 ## CLI
 
 ```
-wacon login | logout | status
+wacon login | logout | status | presence <available|unavailable>
 wacon chats | read <chat> | send <chat> <texto> | search <query> | contacts <nombre>
+wacon watch [-m 30] [-p 40] [-g] | digest [-m 60] | window
 wacon init | profile <chat> [--note "..." --section "..."] | persona
 wacon daemon start|stop|log | config | mcp
 ```
+
+`wacon watch` es vigilancia en vivo en la terminal con triaje por prioridad; `wacon window` te dice si vale la pena estar en línea ahora mismo.
 
 ## Seguridad
 

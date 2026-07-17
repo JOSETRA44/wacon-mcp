@@ -1,5 +1,5 @@
 {
-  "name": "wacon",
+  "name": "@josetra/wacon",
   "version": "0.1.0",
   "description": "WhatsApp AI CLI + MCP server — lets AI agents and humans manage WhatsApp with per-contact style memory, hybrid local RAG and episodic memory",
   "type": "module",

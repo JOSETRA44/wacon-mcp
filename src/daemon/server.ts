@@ -22,6 +22,14 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "summarizeEpisode",
   "groupInfo",
   "send",
+  "startWatch",
+  "stopWatch",
+  "watchStatus",
+  "waitForMessages",
+  "suggestWatchWindow",
+  "digest",
+  "setPresence",
+  "markRead",
   "getProfile",
   "observe",
   "analyzeContact",
@@ -72,7 +80,11 @@ export async function runDaemon(): Promise<void> {
       }
       try {
         const fn = api[method as keyof WaconApi] as (...a: unknown[]) => Promise<unknown>;
-        const result = await fn(...(args ?? []));
+        // JSON turns omitted optional args into null, which would defeat the
+        // default parameter values downstream (and hand null to SQLite).
+        // No WaconApi method takes a meaningful null, so restore undefined.
+        const cleanArgs = (args ?? []).map((a) => (a === null ? undefined : a));
+        const result = await fn(...cleanArgs);
         res.json({ result: result ?? null });
       } catch (err) {
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -115,6 +127,7 @@ export async function runDaemon(): Promise<void> {
 
   const shutdown = async () => {
     clearDaemonInfo();
+    service.watch.releaseAll(); // unblock any long-polling agent before we die
     await connection.stop().catch(() => undefined);
     store.close();
     process.exit(0);
