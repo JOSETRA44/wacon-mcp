@@ -36,6 +36,27 @@ export interface SentLogRow {
   dry_run: number;
 }
 
+export interface FactRow {
+  id: number;
+  jid: string;
+  category: string;
+  fact: string;
+  confidence: number;
+  source_msg_id: string | null;
+  learned_at: number;
+  updated_at: number;
+}
+
+export interface PlaybookCacheRow {
+  id: number;
+  tag: string;
+  situation_hash: string;
+  question: string;
+  answer: string;
+  citations_json: string | null;
+  created_at: number;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS chats (
   jid TEXT PRIMARY KEY,
@@ -110,6 +131,47 @@ CREATE TABLE IF NOT EXISTS sent_log (
   client_name TEXT NOT NULL DEFAULT 'unknown',
   timestamp INTEGER NOT NULL,
   dry_run INTEGER NOT NULL DEFAULT 0
+);
+
+-- Dimension 1 of contact memory: discrete FACTS about the person (who they
+-- are, what they like, dates). Kept structured (not prose) so they can be
+-- deduped, updated in place, and retrieved selectively — that is what keeps
+-- per-contact memory cheap in tokens.
+CREATE TABLE IF NOT EXISTS contact_facts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  jid TEXT NOT NULL,
+  category TEXT NOT NULL,
+  fact TEXT NOT NULL,
+  fact_norm TEXT NOT NULL,
+  confidence REAL NOT NULL DEFAULT 0.8,
+  source_msg_id TEXT,
+  learned_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE (jid, fact_norm)
+);
+CREATE INDEX IF NOT EXISTS idx_facts_jid ON contact_facts (jid, category);
+
+-- Chats flagged "special" (ventas, seduccion, debate...). A tag routes the
+-- chat to an external knowledge notebook when an agent asks for a playbook.
+CREATE TABLE IF NOT EXISTS chat_tags (
+  jid TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  added_at INTEGER NOT NULL,
+  PRIMARY KEY (jid, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_tags_tag ON chat_tags (tag);
+
+-- Cache of NotebookLM answers so similar situations don't re-query (saves
+-- both latency and the external round-trip).
+CREATE TABLE IF NOT EXISTS playbook_cache (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  tag TEXT NOT NULL,
+  situation_hash TEXT NOT NULL,
+  question TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  citations_json TEXT,
+  created_at INTEGER NOT NULL,
+  UNIQUE (tag, situation_hash)
 );
 `;
 
@@ -503,6 +565,107 @@ export class Store {
       last_ts: number;
       last_text: string | null;
     }[];
+  }
+
+  // ── contact facts (memory dimension 1) ───────────────────
+
+  /** Normalize so "le gusta el reggaetón" and "Le gusta el reggaeton" dedupe. */
+  private static normFact(fact: string): string {
+    return fact
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/\p{M}/gu, "")
+      .replace(/[^\p{L}\p{N}\s]/gu, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  /** Insert a fact, or update it in place if a near-identical one exists (dynamic memory). */
+  upsertFact(entry: { jid: string; category: string; fact: string; confidence?: number; sourceMsgId?: string | null }): { id: number; updated: boolean } {
+    const norm = Store.normFact(entry.fact);
+    const now = Date.now();
+    const existing = this.db.prepare(`SELECT id FROM contact_facts WHERE jid = ? AND fact_norm = ?`).get(entry.jid, norm) as
+      | { id: number }
+      | undefined;
+    if (existing) {
+      this.db
+        .prepare(`UPDATE contact_facts SET category = ?, fact = ?, confidence = ?, source_msg_id = COALESCE(?, source_msg_id), updated_at = ? WHERE id = ?`)
+        .run(entry.category, entry.fact, entry.confidence ?? 0.8, entry.sourceMsgId ?? null, now, existing.id);
+      return { id: existing.id, updated: true };
+    }
+    const result = this.db
+      .prepare(
+        `INSERT INTO contact_facts (jid, category, fact, fact_norm, confidence, source_msg_id, learned_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(entry.jid, entry.category, entry.fact, norm, entry.confidence ?? 0.8, entry.sourceMsgId ?? null, now, now);
+    return { id: Number(result.lastInsertRowid), updated: false };
+  }
+
+  listFacts(jid: string): FactRow[] {
+    return this.db
+      .prepare(
+        `SELECT id, jid, category, fact, confidence, source_msg_id, learned_at, updated_at
+         FROM contact_facts WHERE jid = ? ORDER BY category, updated_at DESC`
+      )
+      .all(jid) as FactRow[];
+  }
+
+  deleteFact(id: number, jid?: string): boolean {
+    const result = jid
+      ? this.db.prepare(`DELETE FROM contact_facts WHERE id = ? AND jid = ?`).run(id, jid)
+      : this.db.prepare(`DELETE FROM contact_facts WHERE id = ?`).run(id);
+    return result.changes > 0;
+  }
+
+  /** Categories that already have at least one fact for this contact. */
+  factCategories(jid: string): Set<string> {
+    const rows = this.db.prepare(`SELECT DISTINCT category FROM contact_facts WHERE jid = ?`).all(jid) as { category: string }[];
+    return new Set(rows.map((r) => r.category));
+  }
+
+  // ── chat tags (special chats) ────────────────────────────
+
+  tagChat(jid: string, tag: string): void {
+    this.db.prepare(`INSERT OR IGNORE INTO chat_tags (jid, tag, added_at) VALUES (?, ?, ?)`).run(jid, tag.toLowerCase(), Date.now());
+  }
+
+  untagChat(jid: string, tag: string): boolean {
+    return this.db.prepare(`DELETE FROM chat_tags WHERE jid = ? AND tag = ?`).run(jid, tag.toLowerCase()).changes > 0;
+  }
+
+  chatTags(jid: string): string[] {
+    return (this.db.prepare(`SELECT tag FROM chat_tags WHERE jid = ? ORDER BY tag`).all(jid) as { tag: string }[]).map((r) => r.tag);
+  }
+
+  listTaggedChats(): { jid: string; tags: string[] }[] {
+    const rows = this.db.prepare(`SELECT jid, tag FROM chat_tags ORDER BY jid`).all() as { jid: string; tag: string }[];
+    const map = new Map<string, string[]>();
+    for (const r of rows) {
+      const arr = map.get(r.jid) ?? [];
+      arr.push(r.tag);
+      map.set(r.jid, arr);
+    }
+    return [...map.entries()].map(([jid, tags]) => ({ jid, tags }));
+  }
+
+  // ── playbook cache ───────────────────────────────────────
+
+  getCachedPlaybook(tag: string, situationHash: string): PlaybookCacheRow | null {
+    return (
+      (this.db.prepare(`SELECT * FROM playbook_cache WHERE tag = ? AND situation_hash = ?`).get(tag, situationHash) as PlaybookCacheRow | undefined) ??
+      null
+    );
+  }
+
+  cachePlaybook(entry: { tag: string; situationHash: string; question: string; answer: string; citationsJson: string | null }): void {
+    this.db
+      .prepare(
+        `INSERT INTO playbook_cache (tag, situation_hash, question, answer, citations_json, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(tag, situation_hash) DO UPDATE SET question = excluded.question, answer = excluded.answer, citations_json = excluded.citations_json, created_at = excluded.created_at`
+      )
+      .run(entry.tag, entry.situationHash, entry.question, entry.answer, entry.citationsJson, Date.now());
   }
 
   // ── sent log ─────────────────────────────────────────────

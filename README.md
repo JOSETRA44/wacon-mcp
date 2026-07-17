@@ -92,12 +92,26 @@ Un agente que hace polling (`list_chats` cada 30s) gasta ~100k tokens por hora p
 - **`get_digest`** — catch-up comprimido por chat en una sola llamada.
 - **`set_presence`** — `unavailable` (default) es **modo sigilo**: recibes todo mientras apareces desconectado. Nadie ve "en línea" a las 3am porque un agente despertó. Leer nunca marca como leído: los tics azules exigen `mark_read` explícito.
 
-## Herramientas MCP (25)
+## Inteligencia: razonar antes de responder
+
+Memoria **bidimensional** por contacto (las dos dimensiones no se mezclan porque viven en almacenamientos distintos):
+
+- **Hechos de la persona** (dim 1) — quién es, gustos, cumpleaños, objetivos. Átomos en SQLite con dedup y detección de huecos: `remember_fact`, `get_contact_facts`. Re-registrar un hecho cambiado lo **actualiza**, no duplica.
+- **Dinámica de interacción** (dim 2) — confianza, bromas internas, tono. Markdown editable: `update_contact_profile`.
+
+**Playbook externo (NotebookLM)** para chats especiales: etiqueta un chat (`tag_chat` con `seduccion`, `ventas`, `debate`…) y Wacon consulta tus libros cargados en NotebookLM (`consult_playbook`) para dar consejos con citas, **fusionados con los hechos del contacto**. Wacon orquesta la consulta internamente vía el CLI `nlm` — cualquier agente lo aprovecha sin configurar nada. Si NotebookLM falla, **degrada** con elegancia (nunca rompe la respuesta). Configura el mapeo tag→notebook en `~/.wacon/notebooks.json`.
+
+**`prepare_reply(chat, situation)`** es el centro: **una llamada** arma el briefing completo (persona + hechos + dinámica + recall + playbook si el chat es especial) y activa "escribiendo…". Reemplaza 5 llamadas → ahorra tokens; los chats no especiales saltan NotebookLM.
+
+**`wacon doctor`** diagnostica todo: WhatsApp, DB, daemon, NotebookLM (nlm autenticado + notebooks existen) y disco.
+
+## Herramientas MCP (34)
 
 **Sesión**: `whatsapp_status`, `whatsapp_login` (QR como imagen)
 **Lectura**: `list_chats`, `read_messages`, `search_messages`, `recall_context` (híbrido), `search_contacts`, `get_group_info`
 **Atención**: `wait_for_messages`, `start_watch`, `stop_watch`, `watch_status`, `suggest_watch_window`, `get_digest`, `set_presence`, `mark_read`
 **Memoria**: `get_contact_profile`, `update_contact_profile`, `analyze_contact`, `get_persona`, `list_episodes`, `read_episode`, `summarize_episode`, `wacon_init`
+**Inteligencia**: `prepare_reply`, `remember_fact`, `forget_fact`, `get_contact_facts`, `tag_chat`, `untag_chat`, `list_special_chats`, `consult_playbook`, `wacon_doctor`
 **Envío**: `send_message` (con `typing_ms` para simular "escribiendo…")
 
 Más resources (`wacon://persona`, `wacon://profile/{chat}`) y el prompt `reply_in_style`.
@@ -127,12 +141,16 @@ Recomendado para las primeras pruebas: `"dryRun": true`, o `allowedChats` con so
 ## CLI
 
 ```
-wacon login | logout | status | presence <available|unavailable>
+wacon login | logout | status | presence <available|unavailable> | doctor
 wacon chats | read <chat> | send <chat> <texto> | search <query> | contacts <nombre>
 wacon watch [-m 30] [-p 40] [-g] | digest [-m 60] | window
-wacon init | profile <chat> [--note "..." --section "..."] | persona
+wacon init | profile <chat> [--note "..."] | persona
+wacon facts <chat> [--add "..." --category ...] | tag <chat> <tag> | untag | special
+wacon playbook <chat> "<situación>"
 wacon daemon start|stop|log | config | mcp
 ```
+
+`wacon doctor` verifica que todo (incluido NotebookLM) esté sano; `wacon playbook` consulta tus libros de persuasión para un chat especial.
 
 `wacon watch` es vigilancia en vivo en la terminal con triaje por prioridad; `wacon window` te dice si vale la pena estar en línea ahora mismo.
 

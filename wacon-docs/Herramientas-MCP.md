@@ -4,7 +4,7 @@ tags: [wacon, mcp, tools]
 
 # Herramientas MCP
 
-25 tools, 2 resources, 1 prompt. Definidos una sola vez en `mcp/server.ts` contra la interfaz `WaconApi` (ver [[Arquitectura]]).
+34 tools, 2 resources, 1 prompt. Definidos una sola vez en `mcp/server.ts` contra la interfaz `WaconApi` (ver [[Arquitectura]]).
 
 ## Sesión
 | Tool | Nota |
@@ -32,10 +32,19 @@ tags: [wacon, mcp, tools]
 | `set_presence` | `unavailable` = sigilo (default); `available` = aparecer en línea |
 | `mark_read` | Tics azules explícitos — leer nunca los envía solo |
 
+## Inteligencia (razonar antes de enviar) — [[Inteligencia-y-Playbook]]
+| Tool | Nota |
+|---|---|
+| `prepare_reply` | ⭐ El centro: 1 llamada arma persona+hechos+dinámica+recall+playbook |
+| `remember_fact` / `forget_fact` / `get_contact_facts` | Dim 1: hechos de la persona (dedup, huecos) |
+| `tag_chat` / `untag_chat` / `list_special_chats` | Marcar chats especiales |
+| `consult_playbook` | Consulta NotebookLM (persuasión); degrada elegante |
+| `wacon_doctor` | Diagnóstico WhatsApp/DB/daemon/NotebookLM/disco |
+
 ## Memoria
 | Tool | Nota |
 |---|---|
-| `get_contact_profile` | Obligatorio antes de enviar; lazy-genera stats |
+| `get_contact_profile` | Obligatorio antes de enviar; ahora incluye facts+tags |
 | `update_contact_profile` | Observaciones cualitativas por sección |
 | `analyze_contact` | Recomputa [[Analyzer\|stats]] |
 | `get_persona` | persona.md |

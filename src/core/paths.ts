@@ -13,6 +13,7 @@ export const PROFILES_DIR = join(WACON_HOME, "profiles");
 export const DB_PATH = join(WACON_HOME, "wacon.db");
 export const PERSONA_PATH = join(WACON_HOME, "persona.md");
 export const CONFIG_PATH = join(WACON_HOME, "config.json");
+export const NOTEBOOKS_PATH = join(WACON_HOME, "notebooks.json");
 export const DAEMON_INFO_PATH = join(WACON_HOME, "daemon.json");
 export const DAEMON_LOG_PATH = join(WACON_HOME, "daemon.log");
 

@@ -394,9 +394,9 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
   server.registerTool(
     "get_contact_profile",
     {
-      title: "Contact style profile + user persona",
+      title: "Contact profile: facts + dynamics + style + tags",
       description:
-        "REQUIRED before send_message. Returns (a) the style profile for this contact: quantitative stats (top emojis, formality, laughter style, message length, recurring phrases) plus qualitative notes from previous agents (relationship dynamics, inside jokes, what to avoid), and (b) the user's global persona. If no profile exists yet it is generated on the fly from history.",
+        "REQUIRED before send_message. Returns the full two-dimensional memory of this contact: (1) FACTS about the person (facts, grouped by category — who they are, likes, dates) plus factGaps (high-value things still unknown, worth learning or asking), (2) interaction DYNAMICS and writing STYLE (the profile: emojis, formality, tuteo/usted, recurring phrases, inside jokes, what to avoid), plus (3) the user's global persona and any special tags on this chat. If drafting a reply, prefer prepare_reply which bundles this with recent messages and (for tagged chats) playbook advice.",
       inputSchema: { chat: z.string().describe("Chat JID or phone number") },
     },
     async ({ chat }) => json(await api.getProfile(chat))
@@ -452,6 +452,121 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
       },
     },
     async ({ min_messages }) => json(await api.initAll(min_messages))
+  );
+
+  // ── facts (memory dimension 1) ───────────────────────────
+
+  server.registerTool(
+    "remember_fact",
+    {
+      title: "Store a fact about the person",
+      description:
+        "Record a concrete fact ABOUT the contact (not about how you talk to them — that's update_contact_profile). Use whenever they reveal something durable: their job, birthday, a pet's name, a strong like/dislike, a goal. Facts are deduped and updated in place, so re-recording a changed fact overwrites the old one (this is how the person-profile stays current). Keep each fact atomic and short.",
+      inputSchema: {
+        chat: z.string().describe("Chat JID or phone number"),
+        category: z.enum(["identidad", "ocupacion", "relacion", "fechas", "gustos", "disgustos", "contexto", "salud", "objetivos"]),
+        fact: z.string().min(2).max(300).describe("One atomic fact, e.g. 'cumpleaños: 5 de marzo' or 'trabaja de enfermera'"),
+        confidence: z.number().min(0).max(1).default(0.8).describe("How sure you are (below 0.5 is flagged as tentative)"),
+      },
+    },
+    async ({ chat, category, fact, confidence }) => json(await api.rememberFact(chat, category, fact, confidence))
+  );
+
+  server.registerTool(
+    "forget_fact",
+    {
+      title: "Delete a fact",
+      description: "Remove a fact that turned out to be wrong or outdated (use the fact id from get_contact_facts / get_contact_profile).",
+      inputSchema: { chat: z.string(), fact_id: z.number().int() },
+    },
+    async ({ chat, fact_id }) => json(await api.forgetFact(chat, fact_id))
+  );
+
+  server.registerTool(
+    "get_contact_facts",
+    {
+      title: "Facts known about the person + gaps",
+      description:
+        "Return the structured facts known about this contact, grouped by category, plus 'gaps': high-value things still unknown (birthday, occupation, how you met…). Use the gaps to decide what to naturally learn or ask about next — that's how memory grows over time.",
+      inputSchema: { chat: z.string().describe("Chat JID or phone number") },
+    },
+    async ({ chat }) => json(await api.getFacts(chat))
+  );
+
+  // ── special chats & external playbook ────────────────────
+
+  server.registerTool(
+    "tag_chat",
+    {
+      title: "Mark a chat as special",
+      description:
+        "Tag a chat (e.g. 'seduccion', 'ventas', 'debate', 'amistad') so it can draw on an external knowledge notebook via consult_playbook / prepare_reply. Tags map to NotebookLM notebooks in ~/.wacon/notebooks.json.",
+      inputSchema: { chat: z.string(), tag: z.string().min(2).max(40).describe("A lowercase tag; see notebooks.json for mapped tags") },
+    },
+    async ({ chat, tag }) => json(await api.tagChat(chat, tag))
+  );
+
+  server.registerTool(
+    "untag_chat",
+    {
+      title: "Remove a chat tag",
+      description: "Remove a special tag from a chat.",
+      inputSchema: { chat: z.string(), tag: z.string() },
+    },
+    async ({ chat, tag }) => json(await api.untagChat(chat, tag))
+  );
+
+  server.registerTool(
+    "list_special_chats",
+    {
+      title: "List tagged chats",
+      description: "List every chat that has special tags, with those tags.",
+      inputSchema: {},
+    },
+    async () => json(await api.listSpecialChats())
+  );
+
+  server.registerTool(
+    "consult_playbook",
+    {
+      title: "Ask the external playbook for advice",
+      description:
+        "For a chat tagged special (ventas, seducción, debate…), consult the mapped NotebookLM notebook (e.g. persuasion books) for concrete, sourced advice tailored to the situation and to what's known about the contact. Returns advice + citations. Degrades gracefully: if the notebook is unavailable, you'll get a note telling you to proceed with general knowledge — the reply flow never breaks. Wacon shows 'composing' while it thinks (this can take 10-30s, which is intentional and human-like). Only call for tagged chats; untagged chats have no playbook.",
+      inputSchema: {
+        chat: z.string(),
+        situation: z.string().min(3).max(500).describe("What you're trying to achieve or the state of the conversation"),
+      },
+    },
+    async ({ chat, situation }) => json(await api.consultPlaybook(chat, situation))
+  );
+
+  // ── prepare_reply: the reasoning-before-sending centerpiece ──
+
+  server.registerTool(
+    "prepare_reply",
+    {
+      title: "Assemble everything needed to reply authentically",
+      description:
+        "THE tool to call before replying. In one shot it bundles the full reasoning context so you don't make 5 separate calls: the user's global persona, the contact's FACTS (dim 1) and gaps, the interaction DYNAMICS + writing STYLE (dim 2), the last messages, relevant memory recall for the situation, and — only if the chat is tagged special — external playbook advice with citations. Sets 'composing' while it works. After it returns, write the reply in the user's voice, send with send_message, then persist what you learned (remember_fact / update_contact_profile / summarize_episode). Untagged chats skip the external notebook entirely (saves tokens and latency).",
+      inputSchema: {
+        chat: z.string().describe("Chat JID or phone number"),
+        situation: z.string().max(500).optional().describe("What you intend to say or achieve. Enables memory recall and (for tagged chats) the playbook. Omit for a plain context bundle."),
+      },
+    },
+    async ({ chat, situation }) => json(await api.prepareReply(chat, situation))
+  );
+
+  // ── diagnostics ──────────────────────────────────────────
+
+  server.registerTool(
+    "wacon_doctor",
+    {
+      title: "Diagnose the Wacon environment",
+      description:
+        "Check that everything Wacon depends on is healthy: WhatsApp session, local database, daemon, NotebookLM (nlm CLI auth + mapped notebooks exist), and disk space. Returns each check with ok/warn/fail and a suggested fix. Run this when something isn't working, or before relying on the playbook for the first time.",
+      inputSchema: {},
+    },
+    async () => json(await api.doctor())
   );
 
   // ── resources ────────────────────────────────────────────

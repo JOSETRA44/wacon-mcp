@@ -6,6 +6,18 @@ import type { WatchWindowSuggestion } from "../core/activity.js";
 import type { ContactProfile, ProfileSection } from "../memory/profiles.js";
 import type { StyleStats } from "../memory/analyzer.js";
 import type { ConnectionState } from "../core/connection.js";
+import type { FactRow } from "../core/store.js";
+import type { FactCategory } from "../memory/facts.js";
+import type { PlaybookResult } from "../knowledge/notebook.js";
+import type { DoctorReport } from "../core/doctor.js";
+
+export interface ContactProfileBundle {
+  profile: ContactProfile | null;
+  persona: PersonaDoc | null;
+  facts: FactRow[];
+  factGaps: { category: string; prompt: string }[];
+  tags: string[];
+}
 
 export interface PersonaDoc {
   stats: Partial<StyleStats> | null;
@@ -46,17 +58,26 @@ export interface WaconApi {
   digest(sinceMinutes?: number, limit?: number): Promise<{ since: string; chats: DigestEntry[]; totalIncoming: number }>;
   setPresence(presence: "available" | "unavailable" | "composing" | "recording" | "paused", chat?: string): Promise<{ presence: string }>;
   markRead(chat: string, limit?: number): Promise<{ marked: number }>;
-  getProfile(chat: string): Promise<{ profile: ContactProfile | null; persona: PersonaDoc | null }>;
+  getProfile(chat: string): Promise<ContactProfileBundle>;
   observe(chat: string, section: ProfileSection, observation: string): Promise<void>;
   analyzeContact(chat: string): Promise<{ stats: StyleStats; summary: string }>;
   getPersona(): Promise<PersonaDoc | null>;
   initAll(minMessages?: number, minOutgoing?: number): Promise<{ personaMessages: number; profilesCreated: string[] }>;
+  rememberFact(chat: string, category: string, fact: string, confidence?: number): Promise<{ id: number; updated: boolean; category: FactCategory }>;
+  forgetFact(chat: string, factId: number): Promise<{ removed: boolean }>;
+  getFacts(chat: string): Promise<{ facts: FactRow[]; gaps: { category: string; prompt: string }[] }>;
+  tagChat(chat: string, tag: string): Promise<{ tags: string[] }>;
+  untagChat(chat: string, tag: string): Promise<{ removed: boolean; tags: string[] }>;
+  listSpecialChats(): Promise<{ jid: string; name: string | null; tags: string[] }[]>;
+  consultPlaybook(chat: string, situation: string): Promise<PlaybookResult>;
+  prepareReply(chat: string, situation?: string): Promise<unknown>;
+  doctor(): Promise<DoctorReport>;
   logout(): Promise<void>;
 }
 
 import type { WaconService } from "../core/service.js";
 
-export function localApi(service: WaconService): WaconApi {
+export function localApi(service: WaconService, daemonInfo?: { port: number; pid: number }): WaconApi {
   return {
     status: async () => service.status(),
     qr: async () => service.qr(),
@@ -83,6 +104,15 @@ export function localApi(service: WaconService): WaconApi {
     analyzeContact: async (chat) => service.analyzeContact(chat),
     getPersona: async () => service.getPersona(),
     initAll: async (minMessages, minOutgoing) => service.initAll(minMessages, minOutgoing),
+    rememberFact: async (chat, category, fact, confidence) => service.rememberFact(chat, category, fact, confidence),
+    forgetFact: async (chat, factId) => service.forgetFact(chat, factId),
+    getFacts: async (chat) => service.getFacts(chat),
+    tagChat: async (chat, tag) => service.tagChat(chat, tag),
+    untagChat: async (chat, tag) => service.untagChat(chat, tag),
+    listSpecialChats: async () => service.listSpecialChats(),
+    consultPlaybook: (chat, situation) => service.consultPlaybook(chat, situation),
+    prepareReply: (chat, situation) => service.prepareReply(chat, situation),
+    doctor: async () => service.doctor(daemonInfo ?? null),
     logout: () => service.logout(),
   };
 }

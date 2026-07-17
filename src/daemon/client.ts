@@ -103,6 +103,34 @@ export class DaemonClient implements WaconApi {
   initAll(minMessages?: number, minOutgoing?: number): ReturnType<WaconApi["initAll"]> {
     return this.rpc("initAll", [minMessages, minOutgoing]);
   }
+  rememberFact(chat: string, category: string, fact: string, confidence?: number): ReturnType<WaconApi["rememberFact"]> {
+    return this.rpc("rememberFact", [chat, category, fact, confidence]);
+  }
+  forgetFact(chat: string, factId: number): ReturnType<WaconApi["forgetFact"]> {
+    return this.rpc("forgetFact", [chat, factId]);
+  }
+  getFacts(chat: string): ReturnType<WaconApi["getFacts"]> {
+    return this.rpc("getFacts", [chat]);
+  }
+  tagChat(chat: string, tag: string): ReturnType<WaconApi["tagChat"]> {
+    return this.rpc("tagChat", [chat, tag]);
+  }
+  untagChat(chat: string, tag: string): ReturnType<WaconApi["untagChat"]> {
+    return this.rpc("untagChat", [chat, tag]);
+  }
+  listSpecialChats(): ReturnType<WaconApi["listSpecialChats"]> {
+    return this.rpc("listSpecialChats");
+  }
+  consultPlaybook(chat: string, situation: string): ReturnType<WaconApi["consultPlaybook"]> {
+    // NotebookLM can take a while; give it room over the server-side timeout.
+    return this.rpc("consultPlaybook", [chat, situation], 270_000);
+  }
+  prepareReply(chat: string, situation?: string): ReturnType<WaconApi["prepareReply"]> {
+    return this.rpc("prepareReply", [chat, situation], 270_000);
+  }
+  doctor(): ReturnType<WaconApi["doctor"]> {
+    return this.rpc("doctor", [], 45_000);
+  }
   async logout(): Promise<void> {
     await this.rpc("logout");
   }

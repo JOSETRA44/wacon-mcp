@@ -8,6 +8,10 @@ import { analyzeStyle, analyzeDynamics, describeStyle, type StyleStats } from ".
 import { recall, type RecallResult } from "../memory/recall.js";
 import { readProfile, writeProfileStats, appendObservation, type ProfileSection, type ContactProfile } from "../memory/profiles.js";
 import { readPersona, writePersonaStats } from "../memory/persona.js";
+import { normalizeCategory, factGaps, renderFacts, type FactCategory } from "../memory/facts.js";
+import { consultPlaybook, type PlaybookResult } from "../knowledge/notebook.js";
+import { runDoctor, type DoctorReport } from "./doctor.js";
+import type { FactRow } from "./store.js";
 
 export interface StatusInfo {
   state: ConnectionState;
@@ -256,7 +260,13 @@ export class WaconService {
    * Profile lookup with lazy analysis: if no profile exists yet but there is
    * history with this contact, compute the stats on the spot.
    */
-  getProfile(jidOrPhone: string): { profile: ContactProfile | null; persona: ReturnType<typeof readPersona> } {
+  getProfile(jidOrPhone: string): {
+    profile: ContactProfile | null;
+    persona: ReturnType<typeof readPersona>;
+    facts: FactRow[];
+    factGaps: { category: string; prompt: string }[];
+    tags: string[];
+  } {
     const jid = normalizeJid(jidOrPhone);
     let profile = readProfile(jid);
     if (!profile || !profile.stats) {
@@ -267,7 +277,127 @@ export class WaconService {
         profile = readProfile(jid);
       }
     }
-    return { profile, persona: readPersona() };
+    const facts = this.store.listFacts(jid);
+    return { profile, persona: readPersona(), facts, factGaps: factGaps(facts), tags: this.store.chatTags(jid) };
+  }
+
+  // ── contact facts (dimension 1) ──────────────────────────
+
+  rememberFact(jidOrPhone: string, category: string, fact: string, confidence?: number, sourceMsgId?: string | null): { id: number; updated: boolean; category: FactCategory } {
+    const jid = normalizeJid(jidOrPhone);
+    const cat = normalizeCategory(category);
+    const res = this.store.upsertFact({ jid, category: cat, fact, confidence, sourceMsgId });
+    return { ...res, category: cat };
+  }
+
+  forgetFact(jidOrPhone: string, factId: number): { removed: boolean } {
+    return { removed: this.store.deleteFact(factId, normalizeJid(jidOrPhone)) };
+  }
+
+  getFacts(jidOrPhone: string): { facts: FactRow[]; gaps: { category: string; prompt: string }[] } {
+    const jid = normalizeJid(jidOrPhone);
+    const facts = this.store.listFacts(jid);
+    return { facts, gaps: factGaps(facts) };
+  }
+
+  // ── special chats & playbook (dimension: external knowledge) ──
+
+  tagChat(jidOrPhone: string, tag: string): { tags: string[] } {
+    const jid = normalizeJid(jidOrPhone);
+    this.store.tagChat(jid, tag);
+    return { tags: this.store.chatTags(jid) };
+  }
+
+  untagChat(jidOrPhone: string, tag: string): { removed: boolean; tags: string[] } {
+    const jid = normalizeJid(jidOrPhone);
+    const removed = this.store.untagChat(jid, tag);
+    return { removed, tags: this.store.chatTags(jid) };
+  }
+
+  listSpecialChats(): { jid: string; name: string | null; tags: string[] }[] {
+    return this.store.listTaggedChats().map((c) => ({ jid: c.jid, name: this.store.resolveDisplayName(c.jid), tags: c.tags }));
+  }
+
+  /** Consult the external playbook for a tagged chat. Shows "composing" while it thinks. */
+  async consultPlaybook(jidOrPhone: string, situation: string): Promise<PlaybookResult> {
+    const jid = normalizeJid(jidOrPhone);
+    if (this.connection.state === "connected") {
+      await this.connection.setPresence("composing", jid).catch(() => undefined);
+    }
+    try {
+      return await consultPlaybook(this.store, jid, situation);
+    } finally {
+      if (this.connection.state === "connected") {
+        await this.connection.setPresence("paused", jid).catch(() => undefined);
+      }
+    }
+  }
+
+  // ── prepare_reply: the reasoning-before-sending centerpiece ──
+
+  /**
+   * Assembles the FULL briefing an agent needs to reply authentically, in ONE
+   * call: global persona + contact facts (dim 1) + interaction dynamics/style
+   * (dim 2) + relevant recall + playbook advice (only if the chat is tagged).
+   * Sets "composing" so the contact sees the human-like typing indicator while
+   * the (deliberately slow) reasoning happens.
+   */
+  async prepareReply(jidOrPhone: string, situation?: string): Promise<{
+    chat: string;
+    displayName: string | null;
+    persona: ReturnType<typeof readPersona>;
+    facts: FactRow[];
+    factGaps: { category: string; prompt: string }[];
+    profile: ContactProfile | null;
+    tags: string[];
+    recent: { at: string; from: string; text: string | null }[];
+    recall: RecallResult | null;
+    playbook: PlaybookResult;
+  }> {
+    const jid = normalizeJid(jidOrPhone);
+    if (this.connection.state === "connected") {
+      await this.connection.setPresence("composing", jid).catch(() => undefined);
+    }
+    try {
+      const base = this.getProfile(jid);
+      const recentRows = this.store.readMessages(jid, 20);
+      const recent = recentRows
+        .slice()
+        .reverse()
+        .map((m) => ({ at: new Date(m.timestamp).toISOString(), from: m.from_me ? "me" : (m.sender_jid ?? "them"), text: m.text }));
+
+      // Recall only when we have a concrete situation to anchor the search.
+      const recallResult = situation ? recall(this.store, situation, { chatJid: jid, limit: 8 }) : null;
+
+      // Playbook only for tagged chats — untagged casual chats skip the external
+      // call entirely (token + latency saving).
+      const playbook = base.tags.length > 0 && situation
+        ? await consultPlaybook(this.store, jid, situation)
+        : { consulted: false, degraded: false, note: base.tags.length === 0 ? "Chat sin etiquetas: sin playbook." : "Sin 'situation': no se consultó playbook." };
+
+      return {
+        chat: jid,
+        displayName: this.store.resolveDisplayName(jid),
+        persona: base.persona,
+        facts: base.facts,
+        factGaps: base.factGaps,
+        profile: base.profile,
+        tags: base.tags,
+        recent,
+        recall: recallResult,
+        playbook,
+      };
+    } finally {
+      if (this.connection.state === "connected") {
+        await this.connection.setPresence("paused", jid).catch(() => undefined);
+      }
+    }
+  }
+
+  // ── diagnostics ──────────────────────────────────────────
+
+  doctor(daemon: { port: number; pid: number } | null): DoctorReport {
+    return runDoctor({ connectionState: this.connection.state, store: this.store, daemon });
   }
 
   observe(jidOrPhone: string, section: ProfileSection, observation: string): void {

@@ -35,6 +35,15 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "analyzeContact",
   "getPersona",
   "initAll",
+  "rememberFact",
+  "forgetFact",
+  "getFacts",
+  "tagChat",
+  "untagChat",
+  "listSpecialChats",
+  "consultPlaybook",
+  "prepareReply",
+  "doctor",
   "logout",
 ]);
 
@@ -44,7 +53,7 @@ export async function runDaemon(): Promise<void> {
   const store = new Store();
   const connection = new WhatsAppConnection(store);
   const service = new WaconService(store, connection);
-  const api = localApi(service);
+  const api = localApi(service, { port: config.daemonPort, pid: process.pid });
   const token = newToken();
 
   const app = express();

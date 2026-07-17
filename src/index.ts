@@ -5,7 +5,8 @@ import { DaemonClient } from "./daemon/client.js";
 import { readDaemonInfo, clearDaemonInfo, pingDaemon } from "./daemon/lifecycle.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { PROFILE_SECTIONS, profilePath, type ProfileSection } from "./memory/profiles.js";
-import { WACON_HOME, PERSONA_PATH, CONFIG_PATH, DAEMON_LOG_PATH } from "./core/paths.js";
+import { WACON_HOME, PERSONA_PATH, CONFIG_PATH, DAEMON_LOG_PATH, NOTEBOOKS_PATH } from "./core/paths.js";
+import { FACT_CATEGORIES } from "./memory/facts.js";
 
 const program = new Command();
 const client = new DaemonClient();
@@ -323,6 +324,116 @@ program
   });
 
 program
+  .command("doctor")
+  .description("Diagnose Wacon: WhatsApp, DB, daemon, NotebookLM, disk")
+  .action(async () => {
+    try {
+      const report = await client.doctor();
+      for (const c of report.checks) {
+        const icon = c.status === "ok" ? pc.green("✓") : c.status === "warn" ? pc.yellow("⚠") : pc.red("✗");
+        console.log(`${icon} ${pc.bold(c.name)}: ${c.detail}`);
+        if (c.fix) console.log(pc.dim(`    → ${c.fix}`));
+      }
+      console.log(report.healthy ? pc.green("\nTodo lo esencial funciona.") : pc.red("\nHay problemas que resolver."));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("facts <chat>")
+  .description("Facts known about a contact (dimension 1 of memory)")
+  .option("--add <fact>", "add/update a fact")
+  .option("--category <cat>", `category for --add: ${FACT_CATEGORIES.join(" | ")}`, "contexto")
+  .option("--forget <id>", "delete a fact by id")
+  .action(async (chat: string, opts: { add?: string; category: string; forget?: string }) => {
+    try {
+      if (opts.forget) {
+        const r = await client.forgetFact(chat, Number(opts.forget));
+        console.log(r.removed ? pc.green("✔ hecho eliminado") : pc.yellow("no existía ese hecho"));
+        return;
+      }
+      if (opts.add) {
+        const r = await client.rememberFact(chat, opts.category, opts.add);
+        console.log(pc.green(`✔ ${r.updated ? "actualizado" : "guardado"} en ${r.category} (id ${r.id})`));
+        return;
+      }
+      const { facts, gaps } = await client.getFacts(chat);
+      if (facts.length === 0) console.log(pc.dim("(sin hechos registrados)"));
+      for (const f of facts) {
+        const conf = f.confidence < 0.5 ? pc.dim(" (tentativo)") : "";
+        console.log(`${pc.dim(`#${f.id}`)} ${pc.cyan(f.category)}: ${f.fact}${conf}`);
+      }
+      if (gaps.length > 0) console.log(pc.dim(`\nhuecos por descubrir: ${gaps.map((g) => g.prompt).join(", ")}`));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("tag <chat> <tag>")
+  .description("Mark a chat as special (routes it to a playbook notebook)")
+  .action(async (chat: string, tag: string) => {
+    try {
+      const r = await client.tagChat(chat, tag);
+      console.log(pc.green(`✔ etiquetas: ${r.tags.join(", ")}`));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("untag <chat> <tag>")
+  .description("Remove a special tag from a chat")
+  .action(async (chat: string, tag: string) => {
+    try {
+      const r = await client.untagChat(chat, tag);
+      console.log(r.removed ? pc.green(`✔ quitado. etiquetas: ${r.tags.join(", ") || "(ninguna)"}`) : pc.yellow("no tenía esa etiqueta"));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("special")
+  .description("List chats tagged as special")
+  .action(async () => {
+    try {
+      const chats = await client.listSpecialChats();
+      if (chats.length === 0) {
+        console.log(pc.dim("no hay chats especiales. Usa `wacon tag <chat> <tag>`"));
+        return;
+      }
+      for (const c of chats) console.log(`${pc.bold(c.name ?? c.jid)} ${pc.magenta(c.tags.join(", "))} ${pc.dim(c.jid)}`);
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("playbook <chat> <situation...>")
+  .description("Consult the external playbook (NotebookLM) for a special chat")
+  .action(async (chat: string, situationParts: string[]) => {
+    try {
+      console.log(pc.cyan("Consultando el playbook (puede tardar)..."));
+      const r = await client.consultPlaybook(chat, situationParts.join(" "));
+      if (!r.consulted) {
+        console.log(pc.yellow(r.note ?? "no se consultó"));
+        return;
+      }
+      if (r.degraded) {
+        console.log(pc.yellow(`⚠ ${r.note}`));
+        return;
+      }
+      console.log(pc.bold(`\nConsejo (${r.notebook}${r.fromCache ? ", caché" : ""}):\n`));
+      console.log(r.advice);
+      if (r.citations && r.citations.length > 0) console.log(pc.dim(`\n${r.citations.length} citas de las fuentes`));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
   .command("mcp")
   .description("Run the MCP server over stdio (register this in your AI agent)")
   .action(async () => {
@@ -382,6 +493,7 @@ program
   .description("Show the config file path (dry-run, rate limit, allowlist)")
   .action(() => {
     console.log(CONFIG_PATH);
+    console.log(pc.dim(`notebooks (playbook): ${NOTEBOOKS_PATH}`));
   });
 
 program.parseAsync().catch(die);

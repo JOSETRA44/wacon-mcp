@@ -30,20 +30,26 @@ demasiado formal a su mejor amigo delata a la IA tan rápido como un error.
 
 ## El workflow obligatorio para responder
 
-Nunca envíes a ciegas. El orden importa y cada paso existe por una razón:
+Nunca envíes a ciegas. La forma más eficiente es **una sola llamada**:
 
-1. **`get_contact_profile`** — devuelve dos cosas: el perfil de ESTE contacto
-   (emojis, formalidad, estilo de risa, tuteo/usted, frases recurrentes, notas
-   cualitativas de agentes anteriores: dinámica, bromas internas, qué evitar) y
-   la persona global del usuario con sus reglas duras. Las reglas de la persona
-   (p. ej. "nunca reveles que eres una IA", "no tomes compromisos sin confirmar")
-   son inquebrantables.
-2. **`read_messages`** — el contexto vivo: qué se está hablando AHORA.
-3. **`recall_context`** — si la respuesta toca algo del pasado (planes, promesas,
-   temas en curso), recupéralo. Es búsqueda híbrida (semántica + keywords +
-   recencia) y tolera typos y jerga; pregunta en lenguaje natural y restringe
-   con `chat` cuando redactes una respuesta.
-4. **Redacta imitando** — calibra con las estadísticas del perfil:
+**`prepare_reply(chat, situation)`** arma TODO el briefing de una vez y ahorra
+tokens (reemplaza 5 llamadas): la persona global del usuario, los **hechos** de
+la persona (dim 1: quién es, gustos, fechas) + huecos por descubrir, la
+**dinámica y estilo** (dim 2: emojis, formalidad, tuteo/usted, bromas internas,
+qué evitar), los últimos mensajes, el recall de memoria relevante, y —solo si el
+chat está etiquetado como especial— el consejo del **playbook** (NotebookLM) con
+citas. Activa "escribiendo…" mientras procesa. Pásale `situation` (qué quieres
+lograr) para habilitar el recall y el playbook.
+
+Si prefieres granular, el orden y su razón:
+1. **`get_contact_profile`** — perfil (dim 2) + hechos (dim 1) + tags + persona
+   global. Las reglas de la persona ("nunca reveles que eres IA", "no tomes
+   compromisos sin confirmar") son inquebrantables.
+2. **`get_contact_facts`** — hechos de la persona y huecos de alto valor.
+3. **`read_messages`** — el contexto vivo.
+4. **`recall_context`** — recupera lo del pasado (planes, promesas, temas).
+5. **`consult_playbook`** — solo para chats especiales (ver abajo).
+6. **Redacta imitando** — calibra con las estadísticas del perfil:
    - `formality` y `pronounStyle` (tuteo/usted/voseo) marcan el registro.
    - `avgMessageLength`: si el usuario escribe mensajes de 40 caracteres, no
      mandes un párrafo.
@@ -56,19 +62,36 @@ Nunca envíes a ciegas. El orden importa y cada paso existe por una razón:
    usuario, el mensaje NO salió) o rechazo por rate-limit/allowlist. Repórtalo
    con honestidad, nunca digas "enviado" si no se envió.
 
+## Chats especiales: el playbook (NotebookLM)
+
+Algunos chats se etiquetan como especiales (`tag_chat`: `seduccion`, `ventas`,
+`debate`, `amistad`…). Para esos, antes de aconsejar puedes consultar libros
+cargados en NotebookLM:
+
+- **`consult_playbook(chat, situation)`** — devuelve consejos concretos con citas
+  de las fuentes, ya fusionados con los hechos que conoces del contacto. Tarda
+  10-30s (Wacon muestra "escribiendo…" — es deseable, parece humano). Solo tiene
+  efecto en chats etiquetados.
+- Si NotebookLM falla, la herramienta **degrada**: te dice "responde con tu
+  conocimiento general". Nunca se rompe el flujo — sigue adelante con lo que sabes.
+- `prepare_reply` ya incluye el playbook automáticamente si el chat está
+  etiquetado, así que normalmente no necesitas llamarlo aparte.
+- ¿Algo no funciona con el playbook? `wacon_doctor` diagnostica nlm/auth/notebook.
+
 ## Después de conversar: consolida memoria
 
 Esto es lo que hace a Wacon mejor con cada uso. Dedica 30 segundos:
 
-- **`update_contact_profile`** — guarda observaciones durables (no triviales):
-  dinámica de la relación, un tema nuevo recurrente, una broma interna, algo a
-  evitar. Sección correcta: `Dinámica`, `Temas recurrentes`, `Bromas internas`,
-  `Qué evitar` o `Notas de agentes`.
+- **`remember_fact`** — hecho nuevo sobre la PERSONA (dim 1): su trabajo, un
+  cumpleaños, un gusto fuerte, un objetivo. Se deduplica y actualiza solo. Es
+  distinto de update_contact_profile (que es sobre cómo interactúan, dim 2).
+- **`update_contact_profile`** — observación sobre la DINÁMICA (dim 2): relación,
+  tema recurrente, broma interna, algo a evitar. Secciones: `Dinámica`,
+  `Temas recurrentes`, `Bromas internas`, `Qué evitar`, `Notas de agentes`.
 - **`summarize_episode`** — al cerrar una conversación, busca el episodio con
   `list_episodes`, léelo con `read_episode` si hace falta, y escribe un resumen
-  factual de ≤3 frases (qué pasó, decisiones, hilos abiertos). Los resúmenes se
-  indexan semánticamente y aparecen en `recall_context` futuro: así las
-  conversaciones se vuelven memoria de largo plazo.
+  factual de ≤3 frases. Los resúmenes se indexan y aparecen en `recall_context`
+  futuro: así las conversaciones se vuelven memoria de largo plazo.
 
 ## Lectura y análisis sin enviar
 
