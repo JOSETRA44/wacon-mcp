@@ -434,6 +434,70 @@ program
   });
 
 program
+  .command("errors")
+  .description("Review recent internal errors (media, transcription, external calls)")
+  .option("--tail <n>", "how many to show", "20")
+  .option("-c, --chat <jid>", "filter to one chat")
+  .action(async (opts: { tail: string; chat?: string }) => {
+    try {
+      const rows = await client.errorLog(Number(opts.tail), opts.chat);
+      if (rows.length === 0) {
+        console.log(pc.green("sin errores registrados ✓"));
+        return;
+      }
+      for (const e of rows) {
+        console.log(`${pc.dim(fmtTime(e.ts))} ${pc.red(e.operation)}${e.chat_jid ? pc.dim(` ${e.chat_jid}`) : ""}: ${e.error}`);
+      }
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("calendar")
+  .description("Show upcoming events the bot has scheduled")
+  .option("-d, --days <n>", "look ahead this many days", "30")
+  .option("--all", "include done/cancelled", false)
+  .action(async (opts: { days: string; all: boolean }) => {
+    try {
+      const events = await client.listEvents({ withinDays: Number(opts.days), includeDone: opts.all });
+      if (events.length === 0) {
+        console.log(pc.dim("no hay eventos agendados"));
+        return;
+      }
+      for (const e of events) {
+        const when = fmtTime(e.start_ts);
+        const status = e.status === "scheduled" ? "" : pc.dim(` [${e.status}]`);
+        console.log(`${pc.cyan(`#${e.id}`)} ${pc.bold(e.title)}${status}`);
+        console.log(pc.dim(`   ${when}${e.chat_jid ? ` · ${e.chat_jid}` : ""}${e.notes ? ` · ${e.notes}` : ""}`));
+      }
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("tasks")
+  .description("Show pending tasks the bot is tracking")
+  .option("--all", "include completed", false)
+  .action(async (opts: { all: boolean }) => {
+    try {
+      const tasks = await client.listTasks(opts.all);
+      if (tasks.length === 0) {
+        console.log(pc.dim("no hay tareas"));
+        return;
+      }
+      for (const t of tasks) {
+        const box = t.done ? pc.green("[x]") : pc.yellow("[ ]");
+        const due = t.due_ts ? pc.dim(` (vence ${fmtTime(t.due_ts)})`) : "";
+        console.log(`${box} ${pc.cyan(`#${t.id}`)} ${t.title}${due}`);
+      }
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
   .command("mcp")
   .description("Run the MCP server over stdio (register this in your AI agent)")
   .action(async () => {

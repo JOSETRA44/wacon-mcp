@@ -1,8 +1,9 @@
 import { spawnSync } from "node:child_process";
-import { statfsSync } from "node:fs";
+import { statfsSync, existsSync } from "node:fs";
 import type { Store } from "./store.js";
 import type { ConnectionState } from "./connection.js";
 import { loadNotebooksConfig } from "./notebooks-config.js";
+import { loadConfig } from "./config.js";
 import { WACON_HOME } from "./paths.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
@@ -122,10 +123,46 @@ export function runDoctor(inputs: DoctorInputs): DoctorReport {
       : { name: "Daemon", status: "warn", detail: "no reportado", fix: "El daemon arranca solo al usar cualquier comando." }
   );
 
-  // NotebookLM + disk
+  // NotebookLM + media backends + disk
   const config = loadNotebooksConfig();
   checks.push(checkNotebookLM(config.nlmPath));
+  checks.push(checkMediaBackends());
   checks.push(checkDisk());
 
   return { checks, healthy: !checks.some((c) => c.status === "fail") };
+}
+
+/** Report the optional layer-2 media backends (transcription/vision). */
+function checkMediaBackends(): CheckResult {
+  const cfg = loadConfig();
+  const parts: string[] = [];
+  const t = cfg.transcription.backend;
+  const v = cfg.vision.backend;
+
+  if (t === "none") {
+    parts.push("audio→bloque nativo MCP");
+  } else if (t === "whispercpp") {
+    const ok = cfg.transcription.binPath && existsSync(cfg.transcription.binPath) && cfg.transcription.modelPath && existsSync(cfg.transcription.modelPath);
+    if (!ok) {
+      return {
+        name: "Multimedia (backends)",
+        status: "warn",
+        detail: "transcripción whispercpp configurada pero falta binPath/modelPath",
+        fix: "Instala whisper.cpp y apunta transcription.binPath y modelPath en config.json, o pon backend 'none' para usar el bloque de audio nativo.",
+      };
+    }
+    parts.push("audio→whisper.cpp");
+  } else {
+    if (!cfg.transcription.endpoint) {
+      return {
+        name: "Multimedia (backends)",
+        status: "warn",
+        detail: "transcripción openai-compatible sin endpoint",
+        fix: "Define transcription.endpoint (URL /audio/transcriptions) en config.json, o usa backend 'none'.",
+      };
+    }
+    parts.push("audio→API");
+  }
+  parts.push(v === "none" ? "imagen→bloque nativo MCP" : "imagen→API");
+  return { name: "Multimedia (backends)", status: "ok", detail: parts.join(", ") };
 }

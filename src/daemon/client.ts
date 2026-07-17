@@ -131,6 +131,42 @@ export class DaemonClient implements WaconApi {
   doctor(): ReturnType<WaconApi["doctor"]> {
     return this.rpc("doctor", [], 45_000);
   }
+  viewImage(chat: string, messageId: string): ReturnType<WaconApi["viewImage"]> {
+    return this.rpc("viewImage", [chat, messageId], 120_000);
+  }
+  transcribeAudio(chat: string, messageId: string): ReturnType<WaconApi["transcribeAudio"]> {
+    return this.rpc("transcribeAudio", [chat, messageId], 180_000);
+  }
+  errorLog(limit?: number, chat?: string): ReturnType<WaconApi["errorLog"]> {
+    return this.rpc("errorLog", [limit, chat]);
+  }
+  scheduleEvent(input: Parameters<WaconApi["scheduleEvent"]>[0]): ReturnType<WaconApi["scheduleEvent"]> {
+    return this.rpc("scheduleEvent", [input]);
+  }
+  listEvents(opts?: Parameters<WaconApi["listEvents"]>[0]): ReturnType<WaconApi["listEvents"]> {
+    return this.rpc("listEvents", [opts]);
+  }
+  cancelEvent(id: number): ReturnType<WaconApi["cancelEvent"]> {
+    return this.rpc("cancelEvent", [id]);
+  }
+  completeEvent(id: number): ReturnType<WaconApi["completeEvent"]> {
+    return this.rpc("completeEvent", [id]);
+  }
+  addTask(input: Parameters<WaconApi["addTask"]>[0]): ReturnType<WaconApi["addTask"]> {
+    return this.rpc("addTask", [input]);
+  }
+  listTasks(includeDone?: boolean): ReturnType<WaconApi["listTasks"]> {
+    return this.rpc("listTasks", [includeDone]);
+  }
+  completeTask(id: number): ReturnType<WaconApi["completeTask"]> {
+    return this.rpc("completeTask", [id]);
+  }
+  getAgenda(withinDays?: number): ReturnType<WaconApi["getAgenda"]> {
+    return this.rpc("getAgenda", [withinDays]);
+  }
+  waitForTriggers(opts: Parameters<WaconApi["waitForTriggers"]>[0]): ReturnType<WaconApi["waitForTriggers"]> {
+    return this.rpc("waitForTriggers", [opts], 150_000);
+  }
   async logout(): Promise<void> {
     await this.rpc("logout");
   }

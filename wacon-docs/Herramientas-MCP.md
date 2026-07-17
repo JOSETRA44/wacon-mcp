@@ -4,7 +4,7 @@ tags: [wacon, mcp, tools]
 
 # Herramientas MCP
 
-34 tools, 2 resources, 1 prompt. Definidos una sola vez en `mcp/server.ts` contra la interfaz `WaconApi` (ver [[Arquitectura]]).
+46 tools, 2 resources, 1 prompt. Definidos una sola vez en `mcp/server.ts` contra la interfaz `WaconApi` (ver [[Arquitectura]]).
 
 ## Sesión
 | Tool | Nota |
@@ -31,6 +31,17 @@ tags: [wacon, mcp, tools]
 | `get_digest` | Catch-up comprimido por chat |
 | `set_presence` | `unavailable` = sigilo (default); `available` = aparecer en línea |
 | `mark_read` | Tics azules explícitos — leer nunca los envía solo |
+
+## Multimedia y proactividad — [[Multimedia-y-Proactividad]]
+| Tool | Nota |
+|---|---|
+| `view_image` | Devuelve image block MCP (visión nativa); anti-fraude |
+| `transcribe_audio` | Audio block MCP (capa 1) o transcripción (capa 2); anti-fraude |
+| `get_error_log` | Errores internos registrados (no se filtran al chat) |
+| `schedule_event` / `list_events` / `cancel_event` / `complete_event` | Calendario |
+| `add_task` / `list_tasks` / `complete_task` | Tareas |
+| `get_agenda` | Hora actual + eventos + tareas (conciencia del tiempo) |
+| `wait_for_triggers` | ⭐ Long-poll proactivo: mensaje entrante O evento vencido |
 
 ## Inteligencia (razonar antes de enviar) — [[Inteligencia-y-Playbook]]
 | Tool | Nota |

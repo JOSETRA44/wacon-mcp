@@ -105,13 +105,24 @@ Memoria **bidimensional** por contacto (las dos dimensiones no se mezclan porque
 
 **`wacon doctor`** diagnostica todo: WhatsApp, DB, daemon, NotebookLM (nlm autenticado + notebooks existen) y disco.
 
-## Herramientas MCP (34)
+## Multimedia, tiempo y proactividad
+
+Wacon ya no es ciego, sordo ni atemporal:
+
+- **Vista y oído (agnóstico, sin inflar el paquete):** cuando un contacto manda una imagen o nota de voz, `read_messages` lo marca con un placeholder; `view_image` la devuelve como **bloque de imagen MCP** (el agente la ve con su visión nativa) y `transcribe_audio` como **bloque de audio MCP** (agentes multimodales la escuchan). Capa 2 opcional, configurable en `~/.wacon/config.json`: describir imágenes por API de visión, o transcribir audio con un endpoint compatible OpenAI (Groq/OpenAI/local) o `whisper.cpp` local — se instalan a demanda, nada pesa por defecto.
+- **Regla anti-fraude:** si algo multimedia falla (descarga rota, audio corrupto, API caída), Wacon **nunca** devuelve un error crudo al agente ni al chat; registra el error real localmente y entrega una directriz natural ("no pude escuchar esta nota de voz; pídele que te la escriba"). Revísalos con `wacon errors`.
+- **Conciencia del tiempo + agenda:** `prepare_reply` y `get_agenda` inyectan la fecha/hora actual (el agente entiende "el próximo viernes"). El agente puede `schedule_event`/`add_task`; tú los ves con **`wacon calendar`** y **`wacon tasks`**.
+- **Motor proactivo:** el daemon vigila la agenda y, a la hora de aviso de un evento, despierta a un agente que esté escuchando con **`wait_for_triggers`** (long-poll que devuelve mensajes entrantes **y** eventos vencidos). El agente decide si envía un mensaje proactivo ("Hola María, ¿sigue en pie lo de las 5?"). **El daemon nunca envía solo.** Patrón de uso: corre un agente en bucle (p.ej. `/loop` de Claude Code) llamando `wait_for_triggers`.
+
+## Herramientas MCP (46)
 
 **Sesión**: `whatsapp_status`, `whatsapp_login` (QR como imagen)
 **Lectura**: `list_chats`, `read_messages`, `search_messages`, `recall_context` (híbrido), `search_contacts`, `get_group_info`
 **Atención**: `wait_for_messages`, `start_watch`, `stop_watch`, `watch_status`, `suggest_watch_window`, `get_digest`, `set_presence`, `mark_read`
 **Memoria**: `get_contact_profile`, `update_contact_profile`, `analyze_contact`, `get_persona`, `list_episodes`, `read_episode`, `summarize_episode`, `wacon_init`
 **Inteligencia**: `prepare_reply`, `remember_fact`, `forget_fact`, `get_contact_facts`, `tag_chat`, `untag_chat`, `list_special_chats`, `consult_playbook`, `wacon_doctor`
+**Multimedia**: `view_image`, `transcribe_audio`, `get_error_log`
+**Tiempo/agenda**: `schedule_event`, `list_events`, `cancel_event`, `complete_event`, `add_task`, `list_tasks`, `complete_task`, `get_agenda`, `wait_for_triggers`
 **Envío**: `send_message` (con `typing_ms` para simular "escribiendo…")
 
 Más resources (`wacon://persona`, `wacon://profile/{chat}`) y el prompt `reply_in_style`.
@@ -147,6 +158,7 @@ wacon watch [-m 30] [-p 40] [-g] | digest [-m 60] | window
 wacon init | profile <chat> [--note "..."] | persona
 wacon facts <chat> [--add "..." --category ...] | tag <chat> <tag> | untag | special
 wacon playbook <chat> "<situación>"
+wacon calendar [-d 30] | tasks | errors [--tail 20]
 wacon daemon start|stop|log | config | mcp
 ```
 

@@ -93,6 +93,35 @@ Esto es lo que hace a Wacon mejor con cada uso. Dedica 30 segundos:
   factual de ≤3 frases. Los resúmenes se indexan y aparecen en `recall_context`
   futuro: así las conversaciones se vuelven memoria de largo plazo.
 
+## Imágenes y notas de voz
+
+Si `read_messages` muestra `[imagen] usa view_image(message_id)` o
+`[nota de voz 0:12] usa transcribe_audio(message_id)`, NO ignores el contenido:
+
+- **`view_image(chat, message_id)`** — te devuelve la imagen como bloque nativo
+  para que la veas con tu propia visión. Descríbela solo a partir de lo que
+  realmente ves.
+- **`transcribe_audio(chat, message_id)`** — te devuelve el audio como bloque
+  nativo (escúchalo si eres multimodal) o su transcripción si hay backend.
+- **Regla de oro (anti-fraude):** si cualquiera de estas devuelve `ok:false` con
+  una `guidance`, es un fallo real: **sigue esa directriz, NUNCA inventes** lo
+  que decía el audio o mostraba la imagen, y jamás respondas el error al chat.
+  Si no puedes procesar el medio, es mejor no comentar ese elemento.
+
+## Tiempo, agenda y proactividad
+
+- `prepare_reply` y `get_agenda` te dan la **fecha/hora actual** — úsala para
+  resolver "mañana", "el próximo viernes".
+- Si en la conversación surge una cita o pendiente, **agéndalo**:
+  `schedule_event(title, start, chat?, notify_before_minutes?)` o
+  `add_task(title, due?)`. El humano lo ve con `wacon calendar`/`wacon tasks`.
+- **Ser proactivo:** si el usuario quiere que tomes la iniciativa, corre
+  `wait_for_triggers` en bucle. Te despierta cuando llega un mensaje O cuando se
+  acerca un evento agendado. Al recibir un trigger de evento (ej. "Cita con
+  María — 30 min hasta inicio"), TÚ decides si mandas un mensaje proactivo
+  ("¿sigue en pie lo de las 5?"). Confirma con el criterio del perfil/persona;
+  ante duda, no envíes.
+
 ## Lectura y análisis sin enviar
 
 Para "qué me han escrito", "resume mis grupos", "busca X": empieza por

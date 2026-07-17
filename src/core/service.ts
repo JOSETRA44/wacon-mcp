@@ -11,7 +11,11 @@ import { readPersona, writePersonaStats } from "../memory/persona.js";
 import { normalizeCategory, factGaps, renderFacts, type FactCategory } from "../memory/facts.js";
 import { consultPlaybook, type PlaybookResult } from "../knowledge/notebook.js";
 import { runDoctor, type DoctorReport } from "./doctor.js";
-import type { FactRow } from "./store.js";
+import { ProactiveScheduler } from "./scheduler.js";
+import { logError, GUIDANCE, type Guided } from "./errors.js";
+import { fetchMedia } from "../media/media.js";
+import { transcribe } from "../media/transcription.js";
+import type { FactRow, EventRow, TaskRow, ErrorRow } from "./store.js";
 
 export interface StatusInfo {
   state: ConnectionState;
@@ -68,6 +72,7 @@ export function normalizeJid(input: string): string {
  */
 export class WaconService {
   readonly watch: WatchRegistry;
+  readonly scheduler: ProactiveScheduler;
 
   constructor(
     private store: Store,
@@ -76,6 +81,7 @@ export class WaconService {
     this.watch = new WatchRegistry(store);
     // The connection stays unaware of attention concerns; the service wires them.
     this.connection.on("message", (msg) => this.watch.ingest(msg, this.connection.selfJid));
+    this.scheduler = new ProactiveScheduler(store, this.watch, loadConfig().proactivePollSeconds);
   }
 
   status(): StatusInfo {
@@ -343,6 +349,7 @@ export class WaconService {
    * the (deliberately slow) reasoning happens.
    */
   async prepareReply(jidOrPhone: string, situation?: string): Promise<{
+    now: ReturnType<WaconService["now"]>;
     chat: string;
     displayName: string | null;
     persona: ReturnType<typeof readPersona>;
@@ -350,6 +357,7 @@ export class WaconService {
     factGaps: { category: string; prompt: string }[];
     profile: ContactProfile | null;
     tags: string[];
+    upcomingEvents: EventRow[];
     recent: { at: string; from: string; text: string | null }[];
     recall: RecallResult | null;
     playbook: PlaybookResult;
@@ -376,6 +384,7 @@ export class WaconService {
         : { consulted: false, degraded: false, note: base.tags.length === 0 ? "Chat sin etiquetas: sin playbook." : "Sin 'situation': no se consultó playbook." };
 
       return {
+        now: this.now(), // time awareness: lets the agent resolve "next friday"
         chat: jid,
         displayName: this.store.resolveDisplayName(jid),
         persona: base.persona,
@@ -383,6 +392,7 @@ export class WaconService {
         factGaps: base.factGaps,
         profile: base.profile,
         tags: base.tags,
+        upcomingEvents: this.store.listEvents({ withinDays: 14 }).filter((e) => !e.chat_jid || e.chat_jid === jid),
         recent,
         recall: recallResult,
         playbook,
@@ -441,5 +451,181 @@ export class WaconService {
       profilesCreated.push(chat.chat_jid);
     }
     return { personaMessages: allOutgoing.length, profilesCreated };
+  }
+
+  // ── multimedia (with anti-fraud handling) ────────────────
+
+  /**
+   * Download an image and return it as an MCP-ready block. Layer 2: if a vision
+   * backend is configured, also attach a text description. On ANY failure,
+   * returns natural guidance and logs the real error — never throws.
+   */
+  async viewImage(chatJidOrPhone: string, msgId: string, client = "mcp"): Promise<
+    | { ok: true; base64: string; mimetype: string; description: string | null }
+    | Guided
+  > {
+    const chatJid = normalizeJid(chatJidOrPhone);
+    const config = loadConfig();
+    try {
+      const media = await fetchMedia(this.connection, chatJid, msgId, config.maxMediaBytes);
+      let description: string | null = null;
+      if (config.vision.backend !== "none") {
+        description = await this.describeImage(config, media.base64, media.mimetype ?? "image/jpeg").catch(() => null);
+      }
+      return { ok: true, base64: media.base64, mimetype: media.mimetype ?? "image/jpeg", description };
+    } catch (err) {
+      const guidance = /too large/.test(String(err)) ? GUIDANCE.mediaTooLarge : /No media stub/.test(String(err)) ? GUIDANCE.notFound : GUIDANCE.imageFailed;
+      return logError(this.store, { operation: "view_image", chatJid, error: err, context: { msgId }, client }, guidance);
+    }
+  }
+
+  private async describeImage(config: ReturnType<typeof loadConfig>, base64: string, mimetype: string): Promise<string | null> {
+    if (!config.vision.endpoint) return null;
+    const res = await fetch(config.vision.endpoint, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(config.vision.apiKey ? { authorization: `Bearer ${config.vision.apiKey}` } : {}) },
+      body: JSON.stringify({
+        model: config.vision.model ?? "gpt-4o-mini",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "Describe esta imagen en 1-2 frases, en español." },
+              { type: "image_url", image_url: { url: `data:${mimetype};base64,${base64}` } },
+            ],
+          },
+        ],
+      }),
+      signal: AbortSignal.timeout((config.vision.timeoutSeconds ?? 60) * 1000),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { choices?: { message?: { content?: string } }[] };
+    return data.choices?.[0]?.message?.content?.trim() ?? null;
+  }
+
+  /**
+   * Transcribe a voice note. Layer 1 (default): return the audio as an MCP block
+   * for multimodal agents. Layer 2: if a transcription backend is configured,
+   * return text. Anti-fraud: never throws, never leaks a raw error.
+   */
+  async transcribeAudio(chatJidOrPhone: string, msgId: string, client = "mcp"): Promise<
+    | { ok: true; mode: "transcript"; text: string }
+    | { ok: true; mode: "audio-block"; base64: string; mimetype: string; note: string }
+    | Guided
+  > {
+    const chatJid = normalizeJid(chatJidOrPhone);
+    const config = loadConfig();
+    let media;
+    try {
+      media = await fetchMedia(this.connection, chatJid, msgId, config.maxMediaBytes);
+    } catch (err) {
+      const guidance = /too large/.test(String(err)) ? GUIDANCE.mediaTooLarge : /No media stub/.test(String(err)) ? GUIDANCE.notFound : GUIDANCE.audioFailed;
+      return logError(this.store, { operation: "transcribe_audio", chatJid, error: err, context: { msgId }, client }, guidance);
+    }
+    // Layer 2 if configured.
+    if (config.transcription.backend !== "none") {
+      const result = await transcribe(config.transcription, media);
+      if (result.ok && result.text) return { ok: true, mode: "transcript", text: result.text };
+      // Backend failed → log and fall through to the audio block (still useful).
+      logError(this.store, { operation: "transcribe_audio", chatJid, error: result.reason ?? "transcription failed", context: { msgId }, client }, GUIDANCE.transcriptionFailed);
+    }
+    // Layer 1: native audio block.
+    return {
+      ok: true,
+      mode: "audio-block",
+      base64: media.base64,
+      mimetype: media.mimetype ?? "audio/ogg",
+      note: "Si tu agente puede procesar audio, escúchalo directamente. Si no, configura un backend de transcripción (wacon doctor).",
+    };
+  }
+
+  errorLog(limit = 30, chatJid?: string): ErrorRow[] {
+    return this.store.recentErrors(limit, chatJid ? normalizeJid(chatJid) : undefined);
+  }
+
+  // ── time, calendar & tasks ───────────────────────────────
+
+  now(): { iso: string; human: string; tz: string; weekday: string } {
+    const d = new Date();
+    const human = d.toLocaleString("es-ES", { weekday: "long", day: "numeric", month: "long", year: "numeric", hour: "2-digit", minute: "2-digit" });
+    return { iso: d.toISOString(), human, tz: Intl.DateTimeFormat().resolvedOptions().timeZone, weekday: d.toLocaleDateString("es-ES", { weekday: "long" }) };
+  }
+
+  scheduleEvent(input: { chat?: string; title: string; start: string; notifyBeforeMinutes?: number; end?: string; notes?: string; client?: string }): EventRow {
+    const startTs = new Date(input.start).getTime();
+    if (Number.isNaN(startTs)) throw new Error(`Invalid start date: ${input.start}`);
+    const endTs = input.end ? new Date(input.end).getTime() : null;
+    const notifyTs = startTs - (input.notifyBeforeMinutes ?? 60) * 60_000;
+    return this.store.createEvent({
+      chatJid: input.chat ? normalizeJid(input.chat) : null,
+      title: input.title,
+      startTs,
+      endTs: endTs && !Number.isNaN(endTs) ? endTs : null,
+      notifyTs,
+      createdBy: input.client ?? "agent",
+      notes: input.notes ?? null,
+    });
+  }
+
+  listEvents(opts: { includeDone?: boolean; withinDays?: number } = {}): EventRow[] {
+    return this.store.listEvents(opts);
+  }
+
+  cancelEvent(id: number): { cancelled: boolean } {
+    return { cancelled: this.store.setEventStatus(id, "cancelled") };
+  }
+
+  completeEvent(id: number): { done: boolean } {
+    return { done: this.store.setEventStatus(id, "done") };
+  }
+
+  addTask(input: { title: string; due?: string; chat?: string; notes?: string }): TaskRow {
+    const dueTs = input.due ? new Date(input.due).getTime() : null;
+    return this.store.createTask({
+      title: input.title,
+      dueTs: dueTs && !Number.isNaN(dueTs) ? dueTs : null,
+      chatJid: input.chat ? normalizeJid(input.chat) : null,
+      notes: input.notes ?? null,
+    });
+  }
+
+  listTasks(includeDone = false): TaskRow[] {
+    return this.store.listTasks(includeDone);
+  }
+
+  completeTask(id: number): { done: boolean } {
+    return { done: this.store.completeTask(id) };
+  }
+
+  getAgenda(withinDays = 7): { now: ReturnType<WaconService["now"]>; events: EventRow[]; tasks: TaskRow[] } {
+    return { now: this.now(), events: this.store.listEvents({ withinDays }), tasks: this.store.listTasks(false) };
+  }
+
+  // ── proactive triggers (long-poll) ───────────────────────
+
+  async waitForTriggers(opts: { sinceMsg?: number; sinceTrigger?: number; timeoutSeconds?: number }): Promise<{
+    messages: { chat: string; from: string | null; text: string | null; at: string }[];
+    triggers: { eventId: number; chat: string | null; chatName: string | null; title: string; startsAt: string; minutesUntilStart: number | null; notes: string | null }[];
+    msgCursor: number;
+    triggerCursor: number;
+    timedOut: boolean;
+  }> {
+    const timeoutMs = Math.min(Math.max(opts.timeoutSeconds ?? 60, 1), 120) * 1000;
+    const r = await this.watch.waitForTriggers({ sinceMsg: opts.sinceMsg, sinceTrigger: opts.sinceTrigger, timeoutMs });
+    return {
+      messages: r.messages.map((e) => ({ chat: e.message.chat_jid, from: e.message.from_me ? "me" : e.message.sender_jid, text: e.message.text, at: new Date(e.message.timestamp).toISOString() })),
+      triggers: r.triggers.map((t) => ({
+        eventId: t.eventId,
+        chat: t.chatJid,
+        chatName: t.chatName,
+        title: t.title,
+        startsAt: new Date(t.startTs).toISOString(),
+        minutesUntilStart: t.minutesUntilStart,
+        notes: t.notes,
+      })),
+      msgCursor: r.msgCursor,
+      triggerCursor: r.triggerCursor,
+      timedOut: r.messages.length === 0 && r.triggers.length === 0,
+    };
   }
 }

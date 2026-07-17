@@ -6,6 +6,7 @@ import makeWASocket, {
   Browsers,
   getContentType,
   jidNormalizedUser,
+  downloadMediaMessage,
   type WASocket,
   type WAMessage,
   type GroupMetadata,
@@ -15,7 +16,63 @@ import { EventEmitter } from "node:events";
 import { rmSync } from "node:fs";
 import pino from "pino";
 import { AUTH_DIR, ensureDirs } from "./paths.js";
-import type { Store, MessageRow } from "./store.js";
+import type { Store, MessageRow, MediaRow } from "./store.js";
+
+const MEDIA_KINDS = ["image", "audio", "video", "document", "sticker"] as const;
+export type MediaKind = (typeof MEDIA_KINDS)[number];
+
+/** Pull the downloadable stub + a human placeholder from a media message. */
+function extractMedia(msg: WAMessage): { stub: Omit<MediaRow, "chat_jid" | "msg_id" | "timestamp"> | null; placeholder: string | null } {
+  const c = msg.message;
+  if (!c) return { stub: null, placeholder: null };
+  const node = c.imageMessage ?? c.audioMessage ?? c.videoMessage ?? c.documentMessage ?? c.stickerMessage;
+  if (!node) return { stub: null, placeholder: null };
+  const kind: MediaKind = c.imageMessage
+    ? "image"
+    : c.audioMessage
+      ? "audio"
+      : c.videoMessage
+        ? "video"
+        : c.documentMessage
+          ? "document"
+          : "sticker";
+  const anyNode = node as {
+    mimetype?: string;
+    mediaKey?: Uint8Array;
+    directPath?: string;
+    url?: string;
+    fileLength?: number | { toNumber(): number };
+    seconds?: number;
+    ptt?: boolean;
+    caption?: string;
+    fileName?: string;
+  };
+  const fileLength = typeof anyNode.fileLength === "object" ? anyNode.fileLength.toNumber() : (anyNode.fileLength ?? null);
+  const seconds = anyNode.seconds ?? null;
+  const stub: Omit<MediaRow, "chat_jid" | "msg_id" | "timestamp"> = {
+    kind,
+    mimetype: anyNode.mimetype ?? null,
+    media_key: anyNode.mediaKey ? Buffer.from(anyNode.mediaKey).toString("base64") : null,
+    direct_path: anyNode.directPath ?? null,
+    url: anyNode.url ?? null,
+    file_length: fileLength,
+    seconds,
+    is_ptt: anyNode.ptt ? 1 : 0,
+    caption: anyNode.caption ?? anyNode.fileName ?? null,
+  };
+  const dur = seconds ? ` ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}` : "";
+  const placeholder =
+    kind === "image"
+      ? `[imagen${anyNode.caption ? `: ${anyNode.caption}` : ""}] usa view_image(message_id)`
+      : kind === "audio"
+        ? `[${anyNode.ptt ? "nota de voz" : "audio"}${dur}] usa transcribe_audio(message_id)`
+        : kind === "video"
+          ? `[video${dur}${anyNode.caption ? `: ${anyNode.caption}` : ""}] usa view_image(message_id)`
+          : kind === "sticker"
+            ? `[sticker]`
+            : `[documento${anyNode.fileName ? `: ${anyNode.fileName}` : ""}]`;
+  return { stub, placeholder };
+}
 
 export type ConnectionState = "disconnected" | "connecting" | "waiting_qr" | "connected" | "logged_out";
 
@@ -59,6 +116,10 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
   state: ConnectionState = "disconnected";
   latestQr: string | null = null;
   selfJid: string | null = null;
+
+  /** Bounded LRU of recent full messages, keyed "chat|id" — the fast path for media download. */
+  private recentMessages = new Map<string, WAMessage>();
+  private static readonly RECENT_LIMIT = 200;
 
   constructor(private store: Store) {
     super();
@@ -167,9 +228,27 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
         if (msg.pushName && row.sender_jid && !row.from_me) {
           this.store.upsertContact({ jid: row.sender_jid, notifyName: msg.pushName });
         }
+        // Capture media: persist the downloadable stub and keep the full
+        // message in the LRU so an agent can view/transcribe it shortly after.
+        const { stub } = extractMedia(msg);
+        if (stub) {
+          this.store.upsertMedia({ chat_jid: row.chat_jid, msg_id: row.id, timestamp: row.timestamp, ...stub });
+          this.cacheMessage(row.chat_jid, row.id, msg);
+        }
         this.emit("message", row);
       }
     });
+  }
+
+  private cacheMessage(chatJid: string, id: string, msg: WAMessage): void {
+    const key = `${chatJid}|${id}`;
+    this.recentMessages.delete(key);
+    this.recentMessages.set(key, msg);
+    while (this.recentMessages.size > WhatsAppConnection.RECENT_LIMIT) {
+      const oldest = this.recentMessages.keys().next().value;
+      if (oldest === undefined) break;
+      this.recentMessages.delete(oldest);
+    }
   }
 
   private toRow(msg: WAMessage): MessageRow | null {
@@ -183,16 +262,75 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
       : chatJid.endsWith("@g.us")
         ? (msg.key.participant ?? null)
         : chatJid;
+    // For media without a caption, store a placeholder as the text so the chat
+    // reads coherently and the agent knows to inspect it (view_image/transcribe_audio).
+    let displayText = text;
+    if (!displayText) {
+      const { placeholder } = extractMedia(msg);
+      displayText = placeholder;
+    }
     return {
       id,
       chat_jid: chatJid,
       sender_jid: senderJid,
       from_me: fromMe,
       timestamp: toMillis(msg.messageTimestamp),
-      text,
+      text: displayText,
       message_type: type,
       quoted_id: quotedId,
     };
+  }
+
+  /**
+   * Download a media message's bytes. Fast path: the cached full WAMessage via
+   * downloadMediaMessage (with reupload retry if WhatsApp's URL expired).
+   * Throws on failure — callers wrap this with the anti-fraud error handling.
+   */
+  async downloadMedia(chatJid: string, msgId: string): Promise<{ buffer: Buffer; mimetype: string | null; kind: string }> {
+    const stub = this.store.getMedia(chatJid, msgId);
+    if (!stub) throw new Error(`No media stub for ${chatJid}/${msgId}`);
+    const socket = this.socket;
+    const cached = this.recentMessages.get(`${chatJid}|${msgId}`);
+    if (cached && socket) {
+      const buffer = (await downloadMediaMessage(
+        cached,
+        "buffer",
+        {},
+        { logger: pino({ level: "silent" }), reuploadRequest: socket.updateMediaMessage }
+      )) as Buffer;
+      return { buffer, mimetype: stub.mimetype, kind: stub.kind };
+    }
+    // Fallback: reconstruct a minimal message from the persisted stub.
+    if (!cached) {
+      const reconstructed = this.messageFromStub(chatJid, msgId, stub);
+      if (reconstructed && socket) {
+        const buffer = (await downloadMediaMessage(
+          reconstructed,
+          "buffer",
+          {},
+          { logger: pino({ level: "silent" }), reuploadRequest: socket.updateMediaMessage }
+        )) as Buffer;
+        return { buffer, mimetype: stub.mimetype, kind: stub.kind };
+      }
+    }
+    throw new Error("media unavailable (not cached and no live socket)");
+  }
+
+  /** Rebuild a downloadable WAMessage from a persisted stub (post-restart path). */
+  private messageFromStub(chatJid: string, msgId: string, stub: MediaRow): WAMessage | null {
+    if (!stub.media_key || !stub.direct_path) return null;
+    const node = {
+      url: stub.url ?? undefined,
+      directPath: stub.direct_path,
+      mediaKey: new Uint8Array(Buffer.from(stub.media_key, "base64")),
+      mimetype: stub.mimetype ?? undefined,
+      fileLength: stub.file_length ?? undefined,
+    };
+    const key = `${stub.kind}Message` as const;
+    return {
+      key: { remoteJid: chatJid, id: msgId, fromMe: false },
+      message: { [key]: node },
+    } as unknown as WAMessage;
   }
 
   private requireSocket(): WASocket {

@@ -569,6 +569,160 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
     async () => json(await api.doctor())
   );
 
+  // ── multimedia (vista/oído) ──────────────────────────────
+
+  server.registerTool(
+    "view_image",
+    {
+      title: "See an image from a chat",
+      description:
+        "Download an image (or video thumbnail) a contact sent and return it so you can SEE it with your own vision. read_messages shows a '[imagen] usa view_image(message_id)' placeholder for these. If a vision backend is configured, a text description is also attached. NEVER invent an image's content — if this returns guidance instead of an image (a failure), follow that guidance and do not describe the image to the chat.",
+      inputSchema: {
+        chat: z.string().describe("Chat JID or phone number"),
+        message_id: z.string().describe("The message id of the image (from read_messages)"),
+      },
+    },
+    async ({ chat, message_id }) => {
+      const r = await api.viewImage(chat, message_id);
+      if (!r.ok) return json(r); // anti-fraud: natural guidance, never a raw error
+      const blocks: ({ type: "text"; text: string } | { type: "image"; data: string; mimeType: string })[] = [
+        { type: "image", data: r.base64, mimeType: r.mimetype },
+      ];
+      if (r.description) blocks.unshift({ type: "text", text: `Descripción automática: ${r.description}` });
+      return { content: blocks };
+    }
+  );
+
+  server.registerTool(
+    "transcribe_audio",
+    {
+      title: "Hear a voice note",
+      description:
+        "Process a voice note / audio a contact sent. read_messages shows a '[nota de voz] usa transcribe_audio(message_id)' placeholder. By default (no backend configured) it returns the audio as a native block for you to HEAR directly if you're multimodal; if a transcription backend is configured, it returns the text instead. NEVER guess what an audio says — if this returns guidance (a failure), follow it and do not fabricate a transcript.",
+      inputSchema: {
+        chat: z.string().describe("Chat JID or phone number"),
+        message_id: z.string().describe("The message id of the voice note (from read_messages)"),
+      },
+    },
+    async ({ chat, message_id }) => {
+      const r = await api.transcribeAudio(chat, message_id);
+      if (!r.ok) return json(r);
+      if (r.mode === "transcript") return json({ transcript: r.text });
+      return {
+        content: [
+          { type: "text" as const, text: r.note },
+          { type: "audio" as const, data: r.base64, mimeType: r.mimetype },
+        ],
+      };
+    }
+  );
+
+  server.registerTool(
+    "get_error_log",
+    {
+      title: "Review recent internal errors",
+      description:
+        "Show recent internal Wacon errors (media downloads, transcription, external calls). These are logged instead of being surfaced raw to chats. Use this to understand why a media tool returned guidance, or to audit what's failing.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(200).default(30),
+        chat: z.string().optional().describe("Filter to one chat"),
+      },
+    },
+    async ({ limit, chat }) => json(await api.errorLog(limit, chat))
+  );
+
+  // ── time, calendar & tasks ───────────────────────────────
+
+  server.registerTool(
+    "schedule_event",
+    {
+      title: "Schedule a calendar event",
+      description:
+        "Create an event so Wacon becomes proactive about it. At notify time (default 60 min before start) the proactive engine wakes any listening agent via wait_for_triggers. Link it to a chat to enable a proactive message (e.g. 'confirmar cita'). Use ISO dates or anything Date can parse; you know the current time from prepare_reply/get_agenda.",
+      inputSchema: {
+        title: z.string().min(2).describe("What the event is"),
+        start: z.string().describe("Start datetime (ISO 8601, e.g. 2026-07-18T17:00:00)"),
+        chat: z.string().optional().describe("Link to a chat JID/phone to enable a proactive message"),
+        notify_before_minutes: z.number().int().min(0).max(1440).default(60),
+        end: z.string().optional(),
+        notes: z.string().optional(),
+      },
+    },
+    async ({ title, start, chat, notify_before_minutes, end, notes }) =>
+      json(await api.scheduleEvent({ title, start, chat, notifyBeforeMinutes: notify_before_minutes, end, notes }))
+  );
+
+  server.registerTool(
+    "list_events",
+    {
+      title: "List calendar events",
+      description: "List upcoming (or all) calendar events.",
+      inputSchema: { within_days: z.number().int().min(1).max(365).optional(), include_done: z.boolean().default(false) },
+    },
+    async ({ within_days, include_done }) => json(await api.listEvents({ withinDays: within_days, includeDone: include_done }))
+  );
+
+  server.registerTool(
+    "cancel_event",
+    { title: "Cancel an event", description: "Cancel a scheduled event by id.", inputSchema: { event_id: z.number().int() } },
+    async ({ event_id }) => json(await api.cancelEvent(event_id))
+  );
+
+  server.registerTool(
+    "complete_event",
+    { title: "Mark an event done", description: "Mark an event as completed by id.", inputSchema: { event_id: z.number().int() } },
+    async ({ event_id }) => json(await api.completeEvent(event_id))
+  );
+
+  server.registerTool(
+    "add_task",
+    {
+      title: "Add a task",
+      description: "Add a to-do for the user/agent. Optional due date and linked chat.",
+      inputSchema: { title: z.string().min(2), due: z.string().optional(), chat: z.string().optional(), notes: z.string().optional() },
+    },
+    async ({ title, due, chat, notes }) => json(await api.addTask({ title, due, chat, notes }))
+  );
+
+  server.registerTool(
+    "list_tasks",
+    { title: "List tasks", description: "List pending (or all) tasks.", inputSchema: { include_done: z.boolean().default(false) } },
+    async ({ include_done }) => json(await api.listTasks(include_done))
+  );
+
+  server.registerTool(
+    "complete_task",
+    { title: "Complete a task", description: "Mark a task done by id.", inputSchema: { task_id: z.number().int() } },
+    async ({ task_id }) => json(await api.completeTask(task_id))
+  );
+
+  server.registerTool(
+    "get_agenda",
+    {
+      title: "Current time + upcoming events & tasks",
+      description:
+        "Get the current date/time (so you can resolve 'next friday', 'tomorrow') plus upcoming events and pending tasks. Call this when you need temporal awareness or to plan.",
+      inputSchema: { within_days: z.number().int().min(1).max(90).default(7) },
+    },
+    async ({ within_days }) => json(await api.getAgenda(within_days))
+  );
+
+  server.registerTool(
+    "wait_for_triggers",
+    {
+      title: "Block until a message OR a scheduled event fires",
+      description:
+        "The proactive long-poll. Blocks server-side and returns when either a new message arrives OR a scheduled event's notify time arrives (e.g. 'Reunión con María' 60 min before). This is how Wacon takes initiative: run this in a loop; when a trigger returns, YOU decide whether to send a proactive message (e.g. 'Hola María, ¿sigue en pie lo de las 5?'). The daemon never sends on its own. Pass back msgCursor/triggerCursor as since to resume without missing or repeating.",
+      inputSchema: {
+        timeout_seconds: z.number().int().min(1).max(120).default(60),
+        since_msg: z.number().int().optional(),
+        since_trigger: z.number().int().optional(),
+      },
+    },
+    async ({ timeout_seconds, since_msg, since_trigger }) =>
+      json(await api.waitForTriggers({ timeoutSeconds: timeout_seconds, sinceMsg: since_msg, sinceTrigger: since_trigger }))
+  );
+
   // ── resources ────────────────────────────────────────────
 
   server.registerResource(

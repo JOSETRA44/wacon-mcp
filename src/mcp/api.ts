@@ -6,10 +6,14 @@ import type { WatchWindowSuggestion } from "../core/activity.js";
 import type { ContactProfile, ProfileSection } from "../memory/profiles.js";
 import type { StyleStats } from "../memory/analyzer.js";
 import type { ConnectionState } from "../core/connection.js";
-import type { FactRow } from "../core/store.js";
+import type { FactRow, EventRow, TaskRow, ErrorRow } from "../core/store.js";
 import type { FactCategory } from "../memory/facts.js";
 import type { PlaybookResult } from "../knowledge/notebook.js";
 import type { DoctorReport } from "../core/doctor.js";
+import type { Guided } from "../core/errors.js";
+
+type ImageResult = { ok: true; base64: string; mimetype: string; description: string | null } | Guided;
+type AudioResult = { ok: true; mode: "transcript"; text: string } | { ok: true; mode: "audio-block"; base64: string; mimetype: string; note: string } | Guided;
 
 export interface ContactProfileBundle {
   profile: ContactProfile | null;
@@ -72,6 +76,18 @@ export interface WaconApi {
   consultPlaybook(chat: string, situation: string): Promise<PlaybookResult>;
   prepareReply(chat: string, situation?: string): Promise<unknown>;
   doctor(): Promise<DoctorReport>;
+  viewImage(chat: string, messageId: string): Promise<ImageResult>;
+  transcribeAudio(chat: string, messageId: string): Promise<AudioResult>;
+  errorLog(limit?: number, chat?: string): Promise<ErrorRow[]>;
+  scheduleEvent(input: { chat?: string; title: string; start: string; notifyBeforeMinutes?: number; end?: string; notes?: string }): Promise<EventRow>;
+  listEvents(opts?: { includeDone?: boolean; withinDays?: number }): Promise<EventRow[]>;
+  cancelEvent(id: number): Promise<{ cancelled: boolean }>;
+  completeEvent(id: number): Promise<{ done: boolean }>;
+  addTask(input: { title: string; due?: string; chat?: string; notes?: string }): Promise<TaskRow>;
+  listTasks(includeDone?: boolean): Promise<TaskRow[]>;
+  completeTask(id: number): Promise<{ done: boolean }>;
+  getAgenda(withinDays?: number): Promise<unknown>;
+  waitForTriggers(opts: { sinceMsg?: number; sinceTrigger?: number; timeoutSeconds?: number }): Promise<unknown>;
   logout(): Promise<void>;
 }
 
@@ -113,6 +129,18 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
     consultPlaybook: (chat, situation) => service.consultPlaybook(chat, situation),
     prepareReply: (chat, situation) => service.prepareReply(chat, situation),
     doctor: async () => service.doctor(daemonInfo ?? null),
+    viewImage: (chat, messageId) => service.viewImage(chat, messageId),
+    transcribeAudio: (chat, messageId) => service.transcribeAudio(chat, messageId),
+    errorLog: async (limit, chat) => service.errorLog(limit, chat),
+    scheduleEvent: async (input) => service.scheduleEvent(input),
+    listEvents: async (opts) => service.listEvents(opts),
+    cancelEvent: async (id) => service.cancelEvent(id),
+    completeEvent: async (id) => service.completeEvent(id),
+    addTask: async (input) => service.addTask(input),
+    listTasks: async (includeDone) => service.listTasks(includeDone),
+    completeTask: async (id) => service.completeTask(id),
+    getAgenda: async (withinDays) => service.getAgenda(withinDays),
+    waitForTriggers: (opts) => service.waitForTriggers(opts),
     logout: () => service.logout(),
   };
 }

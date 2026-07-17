@@ -18,13 +18,15 @@ tags: [wacon, roadmap]
 - [x] Empaquetado npm/GitHub/npx + CI y workflow de publicación
 - [x] Tests (analyzer, vectorizador, recall e2e, watch/long-poll/actividad)
 
+- [x] [[Multimedia-y-Proactividad]]: recibir imágenes/audio (bloques MCP nativos + backends opcionales), regla anti-fraude con error_log, calendario/tareas y motor proactivo (`wait_for_triggers`)
+
 ## Siguiente
 
-- [ ] Media: enviar/recibir imágenes, audio, documentos (Baileys ya lo soporta)
+- [ ] **Enviar** media (imágenes/audio/documentos) — hoy solo recibimos; Baileys ya soporta el envío
 - [ ] Resolución de JIDs `@lid` → contactos reales (WhatsApp está migrando a LIDs de privacidad; hoy algunos chats salen "(sin nombre)")
 - [ ] Auto-resumen de episodios al cerrarse (hoy requiere que un agente lo pida)
-- [ ] Scheduler: recordatorios/mensajes programados vía episodios abiertos
-- [ ] Push real hacia el agente (MCP notifications / triggers) en vez de long-poll cuando el spec lo permita
+- [ ] Eventos recurrentes / recordatorios repetidos en el scheduler
+- [ ] Push real hacia el agente (MCP notifications) en vez de long-poll cuando el spec lo permita
 - [ ] Embeddings reales opcionales (sqlite-vec + modelo local) detrás de `vectorCandidates`
 - [ ] Cifrado de `~/.wacon/auth/` con DPAPI en Windows
 - [ ] Multi-cuenta (varios números → varios daemons con WACON_HOME distintos)

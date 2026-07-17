@@ -44,6 +44,18 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "consultPlaybook",
   "prepareReply",
   "doctor",
+  "viewImage",
+  "transcribeAudio",
+  "errorLog",
+  "scheduleEvent",
+  "listEvents",
+  "cancelEvent",
+  "completeEvent",
+  "addTask",
+  "listTasks",
+  "completeTask",
+  "getAgenda",
+  "waitForTriggers",
   "logout",
 ]);
 
@@ -136,6 +148,7 @@ export async function runDaemon(): Promise<void> {
 
   const shutdown = async () => {
     clearDaemonInfo();
+    service.scheduler.stop();
     service.watch.releaseAll(); // unblock any long-polling agent before we die
     await connection.stop().catch(() => undefined);
     store.close();
@@ -146,6 +159,9 @@ export async function runDaemon(): Promise<void> {
 
   const indexed = store.backfillVectors();
   if (indexed > 0) console.log(`[wacon] memory index: vectorized ${indexed} messages`);
+
+  service.scheduler.start();
+  console.log(`[wacon] proactive scheduler started`);
 
   await connection.start();
   console.log(`[wacon] whatsapp connection started (state: ${connection.state})`);

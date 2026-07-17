@@ -57,6 +57,54 @@ export interface PlaybookCacheRow {
   created_at: number;
 }
 
+export interface MediaRow {
+  chat_jid: string;
+  msg_id: string;
+  kind: string;
+  mimetype: string | null;
+  media_key: string | null;
+  direct_path: string | null;
+  url: string | null;
+  file_length: number | null;
+  seconds: number | null;
+  is_ptt: number;
+  caption: string | null;
+  timestamp: number;
+}
+
+export interface ErrorRow {
+  id: number;
+  ts: number;
+  operation: string;
+  chat_jid: string | null;
+  error: string;
+  context_json: string | null;
+  client: string | null;
+}
+
+export interface EventRow {
+  id: number;
+  chat_jid: string | null;
+  title: string;
+  start_ts: number;
+  end_ts: number | null;
+  notify_ts: number | null;
+  status: string;
+  created_by: string | null;
+  notes: string | null;
+  created_at: number;
+}
+
+export interface TaskRow {
+  id: number;
+  title: string;
+  due_ts: number | null;
+  done: number;
+  chat_jid: string | null;
+  notes: string | null;
+  created_at: number;
+}
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS chats (
   jid TEXT PRIMARY KEY,
@@ -173,6 +221,64 @@ CREATE TABLE IF NOT EXISTS playbook_cache (
   created_at INTEGER NOT NULL,
   UNIQUE (tag, situation_hash)
 );
+
+-- Downloadable stubs for media messages. We store just enough to re-download
+-- via Baileys (downloadContentFromMessage) after a restart, not the bytes.
+CREATE TABLE IF NOT EXISTS media (
+  chat_jid TEXT NOT NULL,
+  msg_id TEXT NOT NULL,
+  kind TEXT NOT NULL,          -- image | audio | video | document | sticker
+  mimetype TEXT,
+  media_key TEXT,             -- base64
+  direct_path TEXT,
+  url TEXT,
+  file_length INTEGER,
+  seconds INTEGER,            -- audio/video duration
+  is_ptt INTEGER NOT NULL DEFAULT 0,  -- voice note vs audio file
+  caption TEXT,
+  timestamp INTEGER NOT NULL,
+  PRIMARY KEY (chat_jid, msg_id)
+);
+
+-- Domain error log (distinct from process-level daemon.log). Anti-fraud rule:
+-- media/external failures are recorded here and NEVER surfaced raw to the chat.
+CREATE TABLE IF NOT EXISTS error_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts INTEGER NOT NULL,
+  operation TEXT NOT NULL,
+  chat_jid TEXT,
+  error TEXT NOT NULL,
+  context_json TEXT,
+  client TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_errors_ts ON error_log (ts DESC);
+
+-- Calendar events. notify_ts is when the proactive engine should wake an agent.
+CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_jid TEXT,
+  title TEXT NOT NULL,
+  start_ts INTEGER NOT NULL,
+  end_ts INTEGER,
+  notify_ts INTEGER,
+  status TEXT NOT NULL DEFAULT 'scheduled',  -- scheduled | fired | done | cancelled
+  created_by TEXT,
+  notes TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_events_notify ON events (status, notify_ts);
+CREATE INDEX IF NOT EXISTS idx_events_start ON events (start_ts);
+
+CREATE TABLE IF NOT EXISTS tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  due_ts INTEGER,
+  done INTEGER NOT NULL DEFAULT 0,
+  chat_jid TEXT,
+  notes TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks (done, due_ts);
 `;
 
 export class Store {
@@ -666,6 +772,96 @@ export class Store {
          ON CONFLICT(tag, situation_hash) DO UPDATE SET question = excluded.question, answer = excluded.answer, citations_json = excluded.citations_json, created_at = excluded.created_at`
       )
       .run(entry.tag, entry.situationHash, entry.question, entry.answer, entry.citationsJson, Date.now());
+  }
+
+  // ── media stubs ──────────────────────────────────────────
+
+  upsertMedia(m: MediaRow): void {
+    this.db
+      .prepare(
+        `INSERT INTO media (chat_jid, msg_id, kind, mimetype, media_key, direct_path, url, file_length, seconds, is_ptt, caption, timestamp)
+         VALUES (@chat_jid, @msg_id, @kind, @mimetype, @media_key, @direct_path, @url, @file_length, @seconds, @is_ptt, @caption, @timestamp)
+         ON CONFLICT(chat_jid, msg_id) DO UPDATE SET
+           direct_path = excluded.direct_path, url = excluded.url, media_key = excluded.media_key`
+      )
+      .run(m);
+  }
+
+  getMedia(chatJid: string, msgId: string): MediaRow | null {
+    return (this.db.prepare(`SELECT * FROM media WHERE chat_jid = ? AND msg_id = ?`).get(chatJid, msgId) as MediaRow | undefined) ?? null;
+  }
+
+  // ── error log (anti-fraud) ───────────────────────────────
+
+  logErrorRow(entry: { operation: string; chatJid?: string | null; error: string; contextJson?: string | null; client?: string | null }): void {
+    this.db
+      .prepare(`INSERT INTO error_log (ts, operation, chat_jid, error, context_json, client) VALUES (?, ?, ?, ?, ?, ?)`)
+      .run(Date.now(), entry.operation, entry.chatJid ?? null, entry.error, entry.contextJson ?? null, entry.client ?? null);
+  }
+
+  recentErrors(limit = 30, chatJid?: string): ErrorRow[] {
+    if (chatJid) {
+      return this.db.prepare(`SELECT * FROM error_log WHERE chat_jid = ? ORDER BY ts DESC LIMIT ?`).all(chatJid, limit) as ErrorRow[];
+    }
+    return this.db.prepare(`SELECT * FROM error_log ORDER BY ts DESC LIMIT ?`).all(limit) as ErrorRow[];
+  }
+
+  // ── calendar events ──────────────────────────────────────
+
+  createEvent(e: { chatJid?: string | null; title: string; startTs: number; endTs?: number | null; notifyTs?: number | null; createdBy?: string | null; notes?: string | null }): EventRow {
+    const result = this.db
+      .prepare(
+        `INSERT INTO events (chat_jid, title, start_ts, end_ts, notify_ts, status, created_by, notes, created_at)
+         VALUES (?, ?, ?, ?, ?, 'scheduled', ?, ?, ?)`
+      )
+      .run(e.chatJid ?? null, e.title, e.startTs, e.endTs ?? null, e.notifyTs ?? null, e.createdBy ?? null, e.notes ?? null, Date.now());
+    return this.getEvent(Number(result.lastInsertRowid))!;
+  }
+
+  getEvent(id: number): EventRow | null {
+    return (this.db.prepare(`SELECT * FROM events WHERE id = ?`).get(id) as EventRow | undefined) ?? null;
+  }
+
+  listEvents(opts: { includeDone?: boolean; withinDays?: number; limit?: number } = {}): EventRow[] {
+    const clauses: string[] = [];
+    const args: unknown[] = [];
+    if (!opts.includeDone) clauses.push(`status IN ('scheduled','fired')`);
+    if (opts.withinDays !== undefined) {
+      clauses.push(`start_ts <= ?`);
+      args.push(Date.now() + opts.withinDays * 86_400_000);
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    args.push(opts.limit ?? 50);
+    return this.db.prepare(`SELECT * FROM events ${where} ORDER BY start_ts ASC LIMIT ?`).all(...args) as EventRow[];
+  }
+
+  setEventStatus(id: number, status: string): boolean {
+    return this.db.prepare(`UPDATE events SET status = ? WHERE id = ?`).run(status, id).changes > 0;
+  }
+
+  /** Events whose notify time has arrived and haven't been fired yet. Drives the proactive engine. */
+  dueEvents(now = Date.now()): EventRow[] {
+    return this.db
+      .prepare(`SELECT * FROM events WHERE status = 'scheduled' AND notify_ts IS NOT NULL AND notify_ts <= ? ORDER BY notify_ts ASC`)
+      .all(now) as EventRow[];
+  }
+
+  // ── tasks ────────────────────────────────────────────────
+
+  createTask(t: { title: string; dueTs?: number | null; chatJid?: string | null; notes?: string | null }): TaskRow {
+    const result = this.db
+      .prepare(`INSERT INTO tasks (title, due_ts, done, chat_jid, notes, created_at) VALUES (?, ?, 0, ?, ?, ?)`)
+      .run(t.title, t.dueTs ?? null, t.chatJid ?? null, t.notes ?? null, Date.now());
+    return this.db.prepare(`SELECT * FROM tasks WHERE id = ?`).get(Number(result.lastInsertRowid)) as TaskRow;
+  }
+
+  listTasks(includeDone = false): TaskRow[] {
+    const where = includeDone ? "" : "WHERE done = 0";
+    return this.db.prepare(`SELECT * FROM tasks ${where} ORDER BY (due_ts IS NULL), due_ts ASC, created_at DESC`).all() as TaskRow[];
+  }
+
+  completeTask(id: number): boolean {
+    return this.db.prepare(`UPDATE tasks SET done = 1 WHERE id = ?`).run(id).changes > 0;
   }
 
   // ── sent log ─────────────────────────────────────────────

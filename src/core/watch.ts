@@ -47,6 +47,20 @@ export interface WatchEvent {
   reasons: string[];
 }
 
+/** A proactive trigger fired by the scheduler when a calendar event's notify time arrives. */
+export interface TriggerEvent {
+  seq: number;
+  kind: "event";
+  eventId: number;
+  chatJid: string | null;
+  chatName: string | null;
+  title: string;
+  startTs: number;
+  minutesUntilStart: number | null;
+  notes: string | null;
+  firedAt: number;
+}
+
 export const DEFAULT_RULE: WatchRule = {
   chats: [],
   excludeChats: [],
@@ -74,15 +88,30 @@ interface Waiter {
   timer: NodeJS.Timeout;
 }
 
+interface CombinedWaiter {
+  sinceMsg: number;
+  sinceTrigger: number;
+  resolve: (r: { messages: WatchEvent[]; triggers: TriggerEvent[] }) => void;
+  timer: NodeJS.Timeout;
+}
+
 export class WatchRegistry {
   private sessions = new Map<string, WatchSession>();
   private buffer: WatchEvent[] = [];
   private waiters = new Set<Waiter>();
   private seq = 0;
+  /** Separate stream for proactive triggers (calendar). */
+  private triggers: TriggerEvent[] = [];
+  private triggerSeq = 0;
+  private combinedWaiters = new Set<CombinedWaiter>();
   /** Contacts the user talks to a lot — used for triage. Refreshed lazily. */
   private vipCache: { jids: Set<string>; at: number } | null = null;
 
   constructor(private store: Store) {}
+
+  get triggerCursor(): number {
+    return this.triggerSeq;
+  }
 
   // ── sessions ─────────────────────────────────────────────
 
@@ -204,6 +233,16 @@ export class WatchRegistry {
       if (this.matches(session, event)) session.matched++;
     }
     this.flushWaiters();
+    this.flushCombined();
+  }
+
+  /** Called by the scheduler when a calendar event's notify time arrives. */
+  emitTrigger(t: Omit<TriggerEvent, "seq">): TriggerEvent {
+    const trigger: TriggerEvent = { ...t, seq: ++this.triggerSeq };
+    this.triggers.push(trigger);
+    if (this.triggers.length > BUFFER_SIZE) this.triggers.splice(0, this.triggers.length - BUFFER_SIZE);
+    this.flushCombined();
+    return trigger;
   }
 
   // ── waiting (long-poll) ──────────────────────────────────
@@ -250,6 +289,56 @@ export class WatchRegistry {
     });
   }
 
+  // ── combined wait (messages + proactive triggers) ────────
+
+  private combinedFor(sinceMsg: number, sinceTrigger: number): { messages: WatchEvent[]; triggers: TriggerEvent[] } {
+    return {
+      messages: this.buffer.filter((e) => e.seq > sinceMsg),
+      triggers: this.triggers.filter((t) => t.seq > sinceTrigger),
+    };
+  }
+
+  private flushCombined(): void {
+    for (const w of [...this.combinedWaiters]) {
+      const r = this.combinedFor(w.sinceMsg, w.sinceTrigger);
+      if (r.messages.length > 0 || r.triggers.length > 0) {
+        clearTimeout(w.timer);
+        this.combinedWaiters.delete(w);
+        w.resolve(r);
+      }
+    }
+  }
+
+  /**
+   * Long-poll for BOTH new inbound messages and proactive triggers. Lets an
+   * agent loop (e.g. Claude Code /loop) be woken either by a contact writing OR
+   * by a scheduled event's time arriving — the basis of proactive autonomy.
+   */
+  waitForTriggers(opts: { sinceMsg?: number; sinceTrigger?: number; timeoutMs: number }): Promise<{ messages: WatchEvent[]; triggers: TriggerEvent[]; msgCursor: number; triggerCursor: number }> {
+    const sinceMsg = opts.sinceMsg ?? this.seq;
+    const sinceTrigger = opts.sinceTrigger ?? this.triggerSeq;
+    const build = (r: { messages: WatchEvent[]; triggers: TriggerEvent[] }) => ({
+      ...r,
+      msgCursor: r.messages.length > 0 ? r.messages[r.messages.length - 1]!.seq : sinceMsg,
+      triggerCursor: r.triggers.length > 0 ? r.triggers[r.triggers.length - 1]!.seq : sinceTrigger,
+    });
+    const existing = this.combinedFor(sinceMsg, sinceTrigger);
+    if (existing.messages.length > 0 || existing.triggers.length > 0) return Promise.resolve(build(existing));
+
+    return new Promise((resolve) => {
+      const w: CombinedWaiter = {
+        sinceMsg,
+        sinceTrigger,
+        resolve: (r) => resolve(build(r)),
+        timer: setTimeout(() => {
+          this.combinedWaiters.delete(w);
+          resolve(build({ messages: [], triggers: [] }));
+        }, opts.timeoutMs),
+      };
+      this.combinedWaiters.add(w);
+    });
+  }
+
   /** Release every blocked waiter (daemon shutdown). */
   releaseAll(): void {
     for (const waiter of this.waiters) {
@@ -257,5 +346,10 @@ export class WatchRegistry {
       waiter.resolve([]);
     }
     this.waiters.clear();
+    for (const w of this.combinedWaiters) {
+      clearTimeout(w.timer);
+      w.resolve({ messages: [], triggers: [] });
+    }
+    this.combinedWaiters.clear();
   }
 }
