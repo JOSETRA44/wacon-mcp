@@ -114,13 +114,28 @@ Wacon ya no es ciego, sordo ni atemporal:
 - **Conciencia del tiempo + agenda:** `prepare_reply` y `get_agenda` inyectan la fecha/hora actual (el agente entiende "el próximo viernes"). El agente puede `schedule_event`/`add_task`; tú los ves con **`wacon calendar`** y **`wacon tasks`**.
 - **Motor proactivo:** el daemon vigila la agenda y, a la hora de aviso de un evento, despierta a un agente que esté escuchando con **`wait_for_triggers`** (long-poll que devuelve mensajes entrantes **y** eventos vencidos). El agente decide si envía un mensaje proactivo ("Hola María, ¿sigue en pie lo de las 5?"). **El daemon nunca envía solo.** Patrón de uso: corre un agente en bucle (p.ej. `/loop` de Claude Code) llamando `wait_for_triggers`.
 
-## Herramientas MCP (46)
+## Análisis automatizado (fuerza bruta, sin tokens)
+
+`wacon init` ya no es solo estadísticas: es un **motor de dos niveles** que evita analizar chat por chat.
+
+- **Tier 1 (determinístico, 0 tokens):** `wacon init [all | --contacts | --groups | --courses | <chat>]` lanza un job en el daemon que, por cada chat, construye perfil de estilo+dinámica, segmenta episodios con **resúmenes extractivos**, extrae **hechos candidatos** (regex: fechas, trabajo, gustos, lugares — baja confianza, marcados `(?)`, confirmables) y recoge **accionables de grupos** (exámenes, entregas) como **sugerencias**. Con una **barra de progreso en vivo** — el humano o un agente ven el mismo avance (`analysis_status`). Probado: 67 chats reales en segundos.
+- **Tier 2 (agente, opcional y barato):** el agente llama `get_analysis_bundle(chat)` y recibe todo **pre-masticado** (estilo, hechos, candidatos, episodios, accionables) — enriquece en vez de leer el historial crudo. **Ya no hace falta un agente para tener datos**; solo para pulirlos.
+- **Sugerencias, no auto-agenda:** los accionables de grupos van a `wacon suggested`; `--confirm <id>` los promueve a evento real (el calendario nunca se llena solo).
+
+```bash
+wacon init all          # todo (incluidos grupos), barra de progreso en vivo
+wacon init --courses    # solo grupos de cursos de la universidad
+wacon suggested         # accionables detectados; --confirm <id> para agendar
+```
+
+## Herramientas MCP (54)
 
 **Sesión**: `whatsapp_status`, `whatsapp_login` (QR como imagen)
 **Lectura**: `list_chats`, `read_messages`, `search_messages`, `recall_context` (híbrido), `search_contacts`, `get_group_info`
 **Atención**: `wait_for_messages`, `start_watch`, `stop_watch`, `watch_status`, `suggest_watch_window`, `get_digest`, `set_presence`, `mark_read`
 **Memoria**: `get_contact_profile`, `update_contact_profile`, `analyze_contact`, `get_persona`, `list_episodes`, `read_episode`, `summarize_episode`, `wacon_init`
 **Inteligencia**: `prepare_reply`, `remember_fact`, `forget_fact`, `get_contact_facts`, `tag_chat`, `untag_chat`, `list_special_chats`, `consult_playbook`, `wacon_doctor`
+**Análisis**: `run_bulk_analysis`, `analysis_status`, `get_analysis_bundle`, `list_suggested_events`, `confirm_suggested_event`, `dismiss_suggested_event`, `resolve_contact`, `list_analysis_targets`
 **Multimedia**: `view_image`, `transcribe_audio`, `get_error_log`
 **Tiempo/agenda**: `schedule_event`, `list_events`, `cancel_event`, `complete_event`, `add_task`, `list_tasks`, `complete_task`, `get_agenda`, `wait_for_triggers`
 **Envío**: `send_message` (con `typing_ms` para simular "escribiendo…")

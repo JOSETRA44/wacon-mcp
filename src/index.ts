@@ -299,18 +299,81 @@ program
   });
 
 program
-  .command("init")
-  .description("Analyze all synced history: build persona.md + per-contact style profiles")
-  .option("--min <n>", "minimum messages per chat", "30")
-  .action(async (opts: { min: string }) => {
+  .command("init [chat]")
+  .description("Auto-analyze history (style, facts, episodes, group actionables) — brute force, no LLM")
+  .option("--all", "include groups too (default: 1:1 contacts only)", false)
+  .option("--groups", "only group chats", false)
+  .option("--courses", "only university course groups", false)
+  .option("--min <n>", "minimum outgoing messages per chat", "10")
+  .action(async (chat: string | undefined, opts: { all: boolean; groups: boolean; courses: boolean; min: string }) => {
     try {
-      console.log(pc.cyan("Analyzing your message history (local, no LLM involved)..."));
-      const result = await client.initAll(Number(opts.min));
-      console.log(pc.green(`✔ persona.md built from ${result.personaMessages} outgoing messages`));
-      console.log(pc.green(`✔ ${result.profilesCreated.length} contact profiles created/updated`));
-      console.log(pc.bold(`\nNow edit your persona by hand — nobody knows your voice better than you:`));
-      console.log(`  ${PERSONA_PATH}`);
-      console.log(pc.dim(`Profiles live in ${WACON_HOME}\\profiles\\`));
+      // Persona (global voice) first — cheap and always useful.
+      await client.initAll(30).catch(() => undefined);
+
+      // `init all` is a keyword, not a chat name.
+      const wantsAll = opts.all || chat?.toLowerCase() === "all";
+      const chatArg = chat && chat.toLowerCase() !== "all" ? chat : undefined;
+      const mode = chatArg ? "chat" : opts.courses ? "courses" : opts.groups ? "groups" : wantsAll ? "all" : "contacts";
+      const job = (await client.runBulkAnalysis({ mode, chat: chatArg, minOutgoing: Number(opts.min) })) as {
+        total: number;
+      };
+      console.log(pc.cyan(`Analizando ${job.total} chats (modo: ${mode}, sin IA)...\n`));
+
+      // Live progress bar — the daemon does the work; we just render its status.
+      const bar = (done: number, total: number) => {
+        const width = 24;
+        const filled = total > 0 ? Math.round((done / total) * width) : 0;
+        return `[${"■".repeat(filled)}${"□".repeat(width - filled)}] ${done}/${total}`;
+      };
+      for (;;) {
+        const s = (await client.analysisStatus()) as {
+          running: boolean; total: number; processed: number; currentChat: string | null;
+          factsFound: number; episodesSummarized: number; suggestionsFound: number; profilesBuilt: number; error: string | null;
+        } | null; // eslint-disable-line @typescript-eslint/no-unnecessary-type-assertion
+        if (!s) break;
+        const line = `${bar(s.processed, s.total)}  ${pc.dim((s.currentChat ?? "").slice(0, 22).padEnd(22))} ${pc.green(`${s.factsFound}h`)} ${pc.cyan(`${s.episodesSummarized}ep`)} ${pc.yellow(`${s.suggestionsFound}sug`)}`;
+        process.stdout.write(`\r${line}   `);
+        if (!s.running) {
+          process.stdout.write("\n");
+          if (s.error) console.log(pc.red(`error: ${s.error}`));
+          console.log(pc.green(`\n✔ ${s.profilesBuilt} perfiles · ${s.factsFound} hechos (auto, baja confianza) · ${s.episodesSummarized} episodios · ${s.suggestionsFound} sugerencias`));
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      console.log(pc.dim(`\nRevisa: wacon facts <chat> · wacon suggested · persona: ${PERSONA_PATH}`));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("suggested")
+  .description("Actionable events found in groups (review, then confirm)")
+  .option("--confirm <id>", "promote a suggestion to a calendar event")
+  .option("--dismiss <id>", "discard a suggestion")
+  .action(async (opts: { confirm?: string; dismiss?: string }) => {
+    try {
+      if (opts.confirm) {
+        const r = await client.confirmSuggestedEvent(Number(opts.confirm));
+        console.log(r.confirmed ? pc.green(`✔ agendado como evento #${r.eventId}`) : pc.yellow("no encontrado"));
+        return;
+      }
+      if (opts.dismiss) {
+        await client.dismissSuggestedEvent(Number(opts.dismiss));
+        console.log(pc.green("✔ descartado"));
+        return;
+      }
+      const items = await client.listSuggestedEvents("suggested", 60);
+      if (items.length === 0) {
+        console.log(pc.dim("sin sugerencias (corre `wacon init --courses` o `--groups`)"));
+        return;
+      }
+      for (const s of items) {
+        console.log(`${pc.cyan(`#${s.id}`)} ${pc.bold(s.title)} ${s.when ? pc.yellow(fmtTime(s.when)) : pc.dim("(sin fecha)")}`);
+        console.log(pc.dim(`   ${s.chatName ?? s.chat}`));
+      }
+      console.log(pc.dim("\nconfirmar: wacon suggested --confirm <id>"));
     } catch (err) {
       die(err);
     }

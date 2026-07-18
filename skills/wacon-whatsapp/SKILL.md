@@ -161,6 +161,27 @@ conversar de verdad — nadie quiere aparecer "en línea" a las 3am porque un
 agente despertó. Al enviar, `typing_ms` muestra "escribiendo…" antes: nadie
 responde un párrafo en 200ms, y calibrarlo a ~40ms por carácter se lee humano.
 
+## Construir la base de conocimiento sin leer todo
+
+No analices chat por chat leyendo el historial crudo — es caro. Wacon hace el
+trabajo duro por fuerza bruta (sin tokens):
+
+1. **`run_bulk_analysis({ mode })`** — dispara el análisis masivo (`contacts`,
+   `groups`, `courses`, `all`, o `chat`). Responde al instante; corre en el daemon.
+2. **`analysis_status`** — púlsalo para ver el progreso (o dile al usuario que
+   mire `wacon init` con su barra en vivo).
+3. **`get_analysis_bundle(chat)`** — te da TODO pre-masticado de un chat: estilo,
+   dinámica, hechos confirmados, **hechos candidatos** (regex, baja confianza),
+   episodios con resumen, y accionables. **Enriquece** esto: confirma los hechos
+   candidatos buenos con `remember_fact`, reescribe los digests `[auto]` de
+   episodios a resúmenes narrativos con `summarize_episode`. No leas el historial
+   crudo salvo que el bundle no alcance.
+4. **Accionables de grupos**: `list_suggested_events` → revisa → `confirm_suggested_event(id)`
+   para agendar los reales (nunca se auto-agendan por seguridad).
+
+Regla: los hechos candidatos vienen con confianza baja y `(?)` — trátalos como
+hipótesis a verificar, no como certezas.
+
 ## Mantenimiento
 
 - `wacon_init` — tras una sincronización grande: reconstruye persona.md y todos

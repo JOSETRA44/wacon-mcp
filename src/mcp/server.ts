@@ -253,6 +253,72 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
   );
 
   server.registerTool(
+    "run_bulk_analysis",
+    {
+      title: "Brute-force analyze many chats (no LLM, no tokens)",
+      description:
+        "Kick off the deterministic analysis pipeline over many chats at once — it builds style/dynamics profiles, segments episodes with extractive summaries, extracts CANDIDATE facts (low-confidence, flagged) from 1:1 chats, and collects actionable SUGGESTIONS (exams/deadlines) from groups. Returns immediately with the job state; poll analysis_status to watch progress. This is the heavy lifting so you don't read chats one by one — afterwards call get_analysis_bundle(chat) to enrich the pre-chewed results cheaply. scope.mode: 'all' | 'contacts' | 'groups' | 'courses' (university course groups only) | 'chat' (needs scope.chat).",
+      inputSchema: {
+        mode: z.enum(["all", "contacts", "groups", "courses", "chat"]).default("contacts"),
+        chat: z.string().optional().describe("Required when mode='chat'"),
+        min_outgoing: z.number().int().min(1).default(10).describe("Skip chats where the user wrote fewer than this"),
+      },
+    },
+    async ({ mode, chat, min_outgoing }) => json(await api.runBulkAnalysis({ mode, chat, minOutgoing: min_outgoing }))
+  );
+
+  server.registerTool(
+    "analysis_status",
+    {
+      title: "Progress of the bulk analysis job",
+      description: "Live status of the last/current run_bulk_analysis job: processed/total chats, current chat, and counts of facts, episodes and suggestions found. Poll this to show progress.",
+      inputSchema: {},
+    },
+    async () => json(await api.analysisStatus())
+  );
+
+  server.registerTool(
+    "get_analysis_bundle",
+    {
+      title: "Pre-chewed analysis package for a chat",
+      description:
+        "Everything Tier-1 already extracted for a chat, so you ENRICH instead of reading raw history: style stats + summary, dynamics notes, confirmed facts, CANDIDATE facts (machine-guessed — confirm the good ones with remember_fact, ignore the rest), episodes with (often auto) summaries, and — for groups — actionable suggestions. The token-efficient starting point for deepening a contact's memory.",
+      inputSchema: { chat: z.string().describe("Chat name, phone or JID (auto-resolved)") },
+    },
+    async ({ chat }) => json(await api.getAnalysisBundle(chat))
+  );
+
+  server.registerTool(
+    "list_suggested_events",
+    {
+      title: "Actionable suggestions found in groups",
+      description: "List deadline/exam/deliverable items the analyzer found in group chats (suggestions only — not on the calendar). Review them and promote the real ones with confirm_suggested_event.",
+      inputSchema: { limit: z.number().int().min(1).max(100).default(50) },
+    },
+    async ({ limit }) => json(await api.listSuggestedEvents("suggested", limit))
+  );
+
+  server.registerTool(
+    "confirm_suggested_event",
+    {
+      title: "Promote a suggestion to a real calendar event",
+      description: "Turn a suggested actionable into a scheduled calendar event (so the proactive engine can remind about it). Confirm the date makes sense first — if the suggestion had no parseable date it defaults to tomorrow and you should adjust.",
+      inputSchema: { id: z.number().int(), notify_before_minutes: z.number().int().min(0).max(4320).default(720) },
+    },
+    async ({ id, notify_before_minutes }) => json(await api.confirmSuggestedEvent(id, notify_before_minutes))
+  );
+
+  server.registerTool(
+    "dismiss_suggested_event",
+    {
+      title: "Dismiss a suggestion",
+      description: "Discard an actionable suggestion that isn't worth scheduling.",
+      inputSchema: { id: z.number().int() },
+    },
+    async ({ id }) => json(await api.dismissSuggestedEvent(id))
+  );
+
+  server.registerTool(
     "search_contacts",
     {
       title: "Find a contact or group",

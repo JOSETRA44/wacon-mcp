@@ -12,6 +12,8 @@ import { normalizeCategory, factGaps, renderFacts, type FactCategory } from "../
 import { consultPlaybook, type PlaybookResult } from "../knowledge/notebook.js";
 import { runDoctor, type DoctorReport } from "./doctor.js";
 import { ProactiveScheduler } from "./scheduler.js";
+import { AnalysisRunner, type AnalysisScope, type AnalysisJob } from "../analysis/runner.js";
+import { extractFacts, extractActionables } from "../analysis/extractors.js";
 import { logError, GUIDANCE, type Guided } from "./errors.js";
 import { fetchMedia } from "../media/media.js";
 import { transcribe } from "../media/transcription.js";
@@ -73,6 +75,7 @@ export function normalizeJid(input: string): string {
 export class WaconService {
   readonly watch: WatchRegistry;
   readonly scheduler: ProactiveScheduler;
+  readonly analysis: AnalysisRunner;
 
   constructor(
     private store: Store,
@@ -82,6 +85,7 @@ export class WaconService {
     // The connection stays unaware of attention concerns; the service wires them.
     this.connection.on("message", (msg) => this.watch.ingest(msg, this.connection.selfJid));
     this.scheduler = new ProactiveScheduler(store, this.watch, loadConfig().proactivePollSeconds);
+    this.analysis = new AnalysisRunner(store);
   }
 
   status(): StatusInfo {
@@ -122,6 +126,83 @@ export class WaconService {
 
   analysisTargets(limit = 25) {
     return this.store.analysisTargets(limit);
+  }
+
+  // ── automated analysis pipeline (brute force, no LLM) ────
+
+  runBulkAnalysis(scope: AnalysisScope): AnalysisJob {
+    return this.analysis.start(scope);
+  }
+
+  analysisStatus(): AnalysisJob | null {
+    return this.analysis.status;
+  }
+
+  /**
+   * The pre-chewed work package for a chat: everything Tier-1 extracted, so an
+   * agent enriches instead of reading raw history. If the chat hasn't been
+   * batch-analyzed yet, this computes the candidates on the fly.
+   */
+  getAnalysisBundle(chatOrPhone: string) {
+    const jid = this.resolveChatJid(chatOrPhone);
+    const all = this.store.allMessages(jid, 5000);
+    const isGroup = jid.endsWith("@g.us");
+    const profile = readProfile(jid);
+    const facts = this.store.listFacts(jid);
+    const episodes = this.store.listEpisodes(jid, 40).map((e) => ({
+      id: e.id,
+      from: new Date(e.start_ts).toISOString(),
+      to: new Date(e.end_ts).toISOString(),
+      messages: e.message_count,
+      summary: e.summary,
+    }));
+    const candidateFacts = isGroup ? [] : extractFacts(all.filter((m) => !m.from_me));
+    const actionables = isGroup ? extractActionables(all) : [];
+    return {
+      chat: jid,
+      displayName: this.store.resolveDisplayName(jid),
+      isGroup,
+      tags: this.store.chatTags(jid),
+      stats: profile?.stats ?? null,
+      styleSummary: profile?.stats ? describeStyle(profile.stats as StyleStats) : null,
+      facts,
+      candidateFacts,
+      dynamicsNotes: profile?.body ?? null,
+      episodes,
+      actionables,
+      messageTotals: { total: all.length, outgoing: all.filter((m) => m.from_me).length },
+    };
+  }
+
+  listSuggestedEvents(status = "suggested", limit = 50) {
+    return this.store.listSuggestedEvents(status, limit).map((s) => ({
+      id: s.id,
+      chat: s.chat_jid,
+      chatName: this.store.resolveDisplayName(s.chat_jid),
+      title: s.title,
+      when: s.when_ts ? new Date(s.when_ts).toISOString() : null,
+      raw: s.raw_text,
+    }));
+  }
+
+  confirmSuggestedEvent(id: number, notifyBeforeMinutes = 720): { confirmed: boolean; eventId?: number } {
+    const s = this.store.getSuggestedEvent(id);
+    if (!s) return { confirmed: false };
+    const startTs = s.when_ts ?? Date.now() + 86_400_000; // default: tomorrow if no date parsed
+    const ev = this.store.createEvent({
+      chatJid: s.chat_jid,
+      title: s.title,
+      startTs,
+      notifyTs: startTs - notifyBeforeMinutes * 60_000,
+      createdBy: "suggested",
+      notes: `Confirmado desde sugerencia #${id}`,
+    });
+    this.store.setSuggestedStatus(id, "confirmed");
+    return { confirmed: true, eventId: ev.id };
+  }
+
+  dismissSuggestedEvent(id: number): { dismissed: boolean } {
+    return { dismissed: this.store.setSuggestedStatus(id, "dismissed") };
   }
 
   listChats(limit = 30) {

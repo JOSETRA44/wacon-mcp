@@ -280,6 +280,22 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks (done, due_ts);
 
+-- Actionable items the brute-force analyzer found in group chats (exams,
+-- deadlines...). SUGGESTIONS only — promoted to a real calendar event on
+-- confirmation, never auto-scheduled.
+CREATE TABLE IF NOT EXISTS suggested_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_jid TEXT NOT NULL,
+  title TEXT NOT NULL,
+  when_ts INTEGER,
+  raw_text TEXT,
+  source_msg_id TEXT,
+  status TEXT NOT NULL DEFAULT 'suggested',  -- suggested | confirmed | dismissed
+  created_at INTEGER NOT NULL,
+  UNIQUE (chat_jid, title)
+);
+CREATE INDEX IF NOT EXISTS idx_suggested_status ON suggested_events (status, when_ts);
+
 -- WhatsApp privacy: 1:1 chats live under a @lid, not the phone number. This
 -- maps between them so a contact named/numbered by an agent resolves to the
 -- chat that actually holds the messages. Fed from message alt-keys, contacts,
@@ -691,6 +707,36 @@ export class Store {
     }[];
   }
 
+  // ── suggested events (brute-force actionables) ───────────
+
+  addSuggestedEvent(e: { chatJid: string; title: string; whenTs: number | null; rawText: string; sourceMsgId: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO suggested_events (chat_jid, title, when_ts, raw_text, source_msg_id, status, created_at)
+         VALUES (?, ?, ?, ?, ?, 'suggested', ?)
+         ON CONFLICT(chat_jid, title) DO NOTHING`
+      )
+      .run(e.chatJid, e.title, e.whenTs, e.rawText, e.sourceMsgId, Date.now());
+  }
+
+  listSuggestedEvents(status = "suggested", limit = 50): {
+    id: number; chat_jid: string; title: string; when_ts: number | null; raw_text: string | null; status: string;
+  }[] {
+    return this.db
+      .prepare(`SELECT id, chat_jid, title, when_ts, raw_text, status FROM suggested_events WHERE status = ? ORDER BY (when_ts IS NULL), when_ts ASC LIMIT ?`)
+      .all(status, limit) as { id: number; chat_jid: string; title: string; when_ts: number | null; raw_text: string | null; status: string }[];
+  }
+
+  getSuggestedEvent(id: number): { id: number; chat_jid: string; title: string; when_ts: number | null } | null {
+    return (this.db.prepare(`SELECT id, chat_jid, title, when_ts FROM suggested_events WHERE id = ?`).get(id) as
+      | { id: number; chat_jid: string; title: string; when_ts: number | null }
+      | undefined) ?? null;
+  }
+
+  setSuggestedStatus(id: number, status: string): boolean {
+    return this.db.prepare(`UPDATE suggested_events SET status = ? WHERE id = ?`).run(status, id).changes > 0;
+  }
+
   // ── LID ↔ phone mapping & chat resolution ────────────────
 
   mapJids(lid: string, pn: string): void {
@@ -822,13 +868,13 @@ export class Store {
   }
 
   /** Ranked worklist for agents building the knowledge base: who's worth analyzing. */
-  analysisTargets(limit = 25): { jid: string; displayName: string | null; total: number; outgoing: number; isGroup: boolean; hasFacts: boolean }[] {
+  analysisTargets(limit = 25, minOutgoing = 15): { jid: string; displayName: string | null; total: number; outgoing: number; isGroup: boolean; hasFacts: boolean }[] {
     const rows = this.db
       .prepare(
         `SELECT m.chat_jid jid, COUNT(*) total, COALESCE(SUM(m.from_me),0) outgoing
-         FROM messages m GROUP BY m.chat_jid HAVING outgoing >= 15 ORDER BY outgoing DESC LIMIT ?`
+         FROM messages m GROUP BY m.chat_jid HAVING outgoing >= ? ORDER BY outgoing DESC LIMIT ?`
       )
-      .all(limit) as { jid: string; total: number; outgoing: number }[];
+      .all(minOutgoing, limit) as { jid: string; total: number; outgoing: number }[];
     return rows.map((r) => ({
       jid: r.jid,
       displayName: this.resolveDisplayName(r.jid),

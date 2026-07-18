@@ -90,6 +90,12 @@ export interface WaconApi {
   waitForTriggers(opts: { sinceMsg?: number; sinceTrigger?: number; timeoutSeconds?: number }): Promise<unknown>;
   resolveContact(query: string): Promise<{ jid: string; displayName: string | null; total: number; outgoing: number; via: string }[]>;
   analysisTargets(limit?: number): Promise<{ jid: string; displayName: string | null; total: number; outgoing: number; isGroup: boolean; hasFacts: boolean }[]>;
+  runBulkAnalysis(scope: { mode: "all" | "contacts" | "groups" | "courses" | "chat"; chat?: string; minOutgoing?: number }): Promise<unknown>;
+  analysisStatus(): Promise<unknown>;
+  getAnalysisBundle(chat: string): Promise<unknown>;
+  listSuggestedEvents(status?: string, limit?: number): Promise<{ id: number; chat: string; chatName: string | null; title: string; when: string | null; raw: string | null }[]>;
+  confirmSuggestedEvent(id: number, notifyBeforeMinutes?: number): Promise<{ confirmed: boolean; eventId?: number }>;
+  dismissSuggestedEvent(id: number): Promise<{ dismissed: boolean }>;
   logout(): Promise<void>;
 }
 
@@ -145,6 +151,12 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
     waitForTriggers: (opts) => service.waitForTriggers(opts),
     resolveContact: async (query) => service.resolveContact(query),
     analysisTargets: async (limit) => service.analysisTargets(limit),
+    runBulkAnalysis: async (scope) => service.runBulkAnalysis(scope),
+    analysisStatus: async () => service.analysisStatus(),
+    getAnalysisBundle: async (chat) => service.getAnalysisBundle(chat),
+    listSuggestedEvents: async (status, limit) => service.listSuggestedEvents(status, limit),
+    confirmSuggestedEvent: async (id, notifyBeforeMinutes) => service.confirmSuggestedEvent(id, notifyBeforeMinutes),
+    dismissSuggestedEvent: async (id) => service.dismissSuggestedEvent(id),
     logout: () => service.logout(),
   };
 }

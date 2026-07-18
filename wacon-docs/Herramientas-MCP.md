@@ -4,7 +4,15 @@ tags: [wacon, mcp, tools]
 
 # Herramientas MCP
 
-48 tools, 2 resources, 1 prompt. Definidos una sola vez en `mcp/server.ts` contra la interfaz `WaconApi` (ver [[Arquitectura]]).
+54 tools, 2 resources, 1 prompt. Definidos una sola vez en `mcp/server.ts` contra la interfaz `WaconApi` (ver [[Arquitectura]]).
+
+## Análisis automatizado — [[Analisis-Automatizado]]
+| Tool | Nota |
+|---|---|
+| `run_bulk_analysis` | ⭐ Fuerza bruta sobre muchos chats (sin IA); responde ya, corre en el daemon |
+| `analysis_status` | Progreso del job (para barra/monitoreo) |
+| `get_analysis_bundle` | ⭐ Paquete pre-masticado por chat: el agente enriquece, no lee crudo |
+| `list_suggested_events` / `confirm_suggested_event` / `dismiss_suggested_event` | Accionables de grupos (sugerencia → evento) |
 
 ## Sesión
 | Tool | Nota |

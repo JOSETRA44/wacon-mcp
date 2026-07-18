@@ -173,6 +173,24 @@ export class DaemonClient implements WaconApi {
   analysisTargets(limit?: number): ReturnType<WaconApi["analysisTargets"]> {
     return this.rpc("analysisTargets", [limit]);
   }
+  runBulkAnalysis(scope: Parameters<WaconApi["runBulkAnalysis"]>[0]): ReturnType<WaconApi["runBulkAnalysis"]> {
+    return this.rpc("runBulkAnalysis", [scope]);
+  }
+  analysisStatus(): ReturnType<WaconApi["analysisStatus"]> {
+    return this.rpc("analysisStatus");
+  }
+  getAnalysisBundle(chat: string): ReturnType<WaconApi["getAnalysisBundle"]> {
+    return this.rpc("getAnalysisBundle", [chat]);
+  }
+  listSuggestedEvents(status?: string, limit?: number): ReturnType<WaconApi["listSuggestedEvents"]> {
+    return this.rpc("listSuggestedEvents", [status, limit]);
+  }
+  confirmSuggestedEvent(id: number, notifyBeforeMinutes?: number): ReturnType<WaconApi["confirmSuggestedEvent"]> {
+    return this.rpc("confirmSuggestedEvent", [id, notifyBeforeMinutes]);
+  }
+  dismissSuggestedEvent(id: number): ReturnType<WaconApi["dismissSuggestedEvent"]> {
+    return this.rpc("dismissSuggestedEvent", [id]);
+  }
   async logout(): Promise<void> {
     await this.rpc("logout");
   }

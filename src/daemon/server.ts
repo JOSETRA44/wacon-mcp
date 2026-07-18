@@ -58,6 +58,12 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "waitForTriggers",
   "resolveContact",
   "analysisTargets",
+  "runBulkAnalysis",
+  "analysisStatus",
+  "getAnalysisBundle",
+  "listSuggestedEvents",
+  "confirmSuggestedEvent",
+  "dismissSuggestedEvent",
   "logout",
 ]);
 

@@ -20,6 +20,7 @@ tags: [wacon, roadmap]
 
 - [x] [[Multimedia-y-Proactividad]]: recibir imágenes/audio (bloques MCP nativos + backends opcionales), regla anti-fraude con error_log, calendario/tareas y motor proactivo (`wait_for_triggers`)
 
+- [x] **Motor de análisis automatizado** ([[Analisis-Automatizado]]): `wacon init [all|--contacts|--groups|--courses]` con barra de progreso en vivo; extractores de hechos (regex), digests extractivos de episodios, accionables de grupos como sugerencias; `get_analysis_bundle` pre-masticado para agentes. Verificado: 67 chats reales en segundos.
 - [x] **Resolución `@lid` ↔ número** (`resolve_contact`, `list_analysis_targets`): captura del mapeo LID↔PN desde `key.remoteJidAlt`, contactos y `lid-mapping.update`; nombres propagados al chat `@lid`; auto-resolución en todos los métodos de lectura/análisis; backfill por saludos para historial. Analizar por nombre o número "simplemente funciona".
 
 ## Siguiente
