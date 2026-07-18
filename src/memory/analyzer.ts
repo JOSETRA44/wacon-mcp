@@ -36,6 +36,30 @@ export interface StyleStats {
   lastAnalyzedAt: string;
 }
 
+/**
+ * Text that is NOT the user's own prose and must never shape their style:
+ *  - Wacon's own media placeholders ("[imagen] usa view_image(...)") — counting
+ *    these was silently teaching the persona to "speak" like our tooling.
+ *  - Pasted code/SQL/JSON, which says nothing about how someone chats.
+ *  - Bare links.
+ */
+const PLACEHOLDER_RE = /^\s*\[(imagen|sticker|nota de voz|audio|video|documento)/i;
+const CODEISH_RE = /(\bNOT NULL\b|\bDEFAULT\b|\bSELECT\b|\bINSERT\b|\bCREATE TABLE\b|\buuid\b|=>|\bconst\s+\w+\s*=|\bfunction\s*\(|^\s*[{[]|\}\s*;?\s*$|<\/?[a-z]+>)/im;
+const LINK_ONLY_RE = /^\s*https?:\/\/\S+\s*$/i;
+/** Any URL anywhere in the text — stripped before style analysis. */
+const URL_RE = /https?:\/\/\S+|www\.\S+/gi;
+
+/** Whether a message is the user's own conversational writing. */
+export function isAuthoredText(text: string | null | undefined): boolean {
+  if (!text) return false;
+  const t = text.trim();
+  if (t.length === 0) return false;
+  if (PLACEHOLDER_RE.test(t)) return false;
+  if (LINK_ONLY_RE.test(t)) return false;
+  if (CODEISH_RE.test(t)) return false;
+  return true;
+}
+
 const EMOJI_RE = /\p{Extended_Pictographic}/gu;
 const LAUGH_PATTERNS: [string, RegExp][] = [
   ["jaja", /\b(?:ja){2,}s?\b/gi],
@@ -141,7 +165,12 @@ export function analyzeDynamics(allMessages: { from_me: number; timestamp: numbe
  * which is what keeps per-contact memory cheap.
  */
 export function analyzeStyle(messages: MessageRow[], dynamics: RelationshipDynamics | null = null): StyleStats {
-  const texts = messages.map((m) => m.text ?? "").filter((t) => t.length > 0);
+  // Only the user's own prose shapes their voice — never our placeholders or
+  // pasted code. URLs are stripped (not the whole message): "mira esto <link>"
+  // is real writing, but the link's tokens are not vocabulary.
+  const texts = messages
+    .map((m) => (m.text ?? "").replace(URL_RE, " ").replace(/\s+/g, " ").trim())
+    .filter(isAuthoredText);
   const n = texts.length;
 
   const emojiCounts = new Map<string, number>();

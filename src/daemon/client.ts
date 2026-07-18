@@ -191,6 +191,15 @@ export class DaemonClient implements WaconApi {
   dismissSuggestedEvent(id: number): ReturnType<WaconApi["dismissSuggestedEvent"]> {
     return this.rpc("dismissSuggestedEvent", [id]);
   }
+  syncStickers(): ReturnType<WaconApi["syncStickers"]> {
+    return this.rpc("syncStickers", [], 120_000);
+  }
+  listStickers(opts?: Parameters<WaconApi["listStickers"]>[0]): ReturnType<WaconApi["listStickers"]> {
+    return this.rpc("listStickers", [opts]);
+  }
+  sendSticker(chat: string, stickerId: string, clientName: string): ReturnType<WaconApi["sendSticker"]> {
+    return this.rpc("sendSticker", [chat, stickerId, clientName], 120_000);
+  }
   async logout(): Promise<void> {
     await this.rpc("logout");
   }

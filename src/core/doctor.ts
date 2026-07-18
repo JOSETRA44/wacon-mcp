@@ -4,6 +4,7 @@ import type { Store } from "./store.js";
 import type { ConnectionState } from "./connection.js";
 import { loadNotebooksConfig } from "./notebooks-config.js";
 import { loadConfig } from "./config.js";
+import { readPersona, isTemplateBody } from "../memory/persona.js";
 import { WACON_HOME } from "./paths.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
@@ -123,6 +124,9 @@ export function runDoctor(inputs: DoctorInputs): DoctorReport {
       : { name: "Daemon", status: "warn", detail: "no reportado", fix: "El daemon arranca solo al usar cualquier comando." }
   );
 
+  // Knowledge layer: is the persona actually usable by agents?
+  checks.push(checkPersona());
+
   // NotebookLM + media backends + disk
   const config = loadNotebooksConfig();
   checks.push(checkNotebookLM(config.nlmPath));
@@ -130,6 +134,27 @@ export function runDoctor(inputs: DoctorInputs): DoctorReport {
   checks.push(checkDisk());
 
   return { checks, healthy: !checks.some((c) => c.status === "fail") };
+}
+
+/**
+ * The persona drives every message sent as the user, so an empty/boilerplate
+ * one is a real problem — flag it instead of letting agents run on nothing.
+ */
+function checkPersona(): CheckResult {
+  const persona = readPersona();
+  if (!persona) {
+    return { name: "Persona (tu voz)", status: "warn", detail: "no existe persona.md", fix: "Ejecuta `wacon init` para generarla desde tus mensajes." };
+  }
+  if (isTemplateBody(persona.body)) {
+    return {
+      name: "Persona (tu voz)",
+      status: "warn",
+      detail: "sigue con la plantilla vacía",
+      fix: "Ejecuta `wacon init` para redactar un borrador con tus datos reales, y luego edítalo a mano.",
+    };
+  }
+  const stats = persona.stats as { messageCount?: number } | null;
+  return { name: "Persona (tu voz)", status: "ok", detail: `redactada${stats?.messageCount ? ` desde ${stats.messageCount} mensajes` : ""}` };
 }
 
 /** Report the optional layer-2 media backends (transcription/vision). */

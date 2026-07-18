@@ -4,12 +4,13 @@ import { loadConfig } from "./config.js";
 import { checkSend } from "./guardrails.js";
 import { WatchRegistry, MAX_WATCH_MINUTES, type WatchRule, type WatchSession, type WatchEvent } from "./watch.js";
 import { suggestWatchWindow, type WatchWindowSuggestion } from "./activity.js";
-import { analyzeStyle, analyzeDynamics, describeStyle, type StyleStats } from "../memory/analyzer.js";
+import { analyzeStyle, analyzeDynamics, describeStyle, isAuthoredText, type StyleStats } from "../memory/analyzer.js";
 import { recall, type RecallResult } from "../memory/recall.js";
 import { readProfile, writeProfileStats, appendObservation, type ProfileSection, type ContactProfile } from "../memory/profiles.js";
 import { readPersona, writePersonaStats } from "../memory/persona.js";
 import { normalizeCategory, factGaps, renderFacts, type FactCategory } from "../memory/facts.js";
 import { consultPlaybook, type PlaybookResult } from "../knowledge/notebook.js";
+import { readFileSync } from "node:fs";
 import { runDoctor, type DoctorReport } from "./doctor.js";
 import { ProactiveScheduler } from "./scheduler.js";
 import { AnalysisRunner, type AnalysisScope, type AnalysisJob } from "../analysis/runner.js";
@@ -17,6 +18,7 @@ import { extractFacts, extractActionables } from "../analysis/extractors.js";
 import { logError, GUIDANCE, type Guided } from "./errors.js";
 import { fetchMedia } from "../media/media.js";
 import { transcribe } from "../media/transcription.js";
+import { importPack, indexOwnStickers, stickerAffinity, MOODS } from "../media/stickers.js";
 import type { FactRow, EventRow, TaskRow, ErrorRow } from "./store.js";
 
 export interface StatusInfo {
@@ -537,9 +539,19 @@ export class WaconService {
    * and a profile for every chat with enough history.
    */
   initAll(minMessages = 30, minOutgoing = 10): { personaMessages: number; profilesCreated: string[] } {
-    const allOutgoing = this.store.allOutgoingMessages();
+    // Balanced sample (capped per chat, 1:1 only) so one heavy chat — an AI
+    // assistant, a work group — can't define the user's whole voice.
+    const allOutgoing = this.store.balancedOutgoingSample(120);
     if (allOutgoing.length > 0) {
-      writePersonaStats(analyzeStyle(allOutgoing));
+      const stats = analyzeStyle(allOutgoing);
+      // Real, representative one-liners so agents can hear the voice, not just read stats.
+      const samples = allOutgoing
+        .map((m) => m.text ?? "")
+        .filter((t) => isAuthoredText(t) && t.length >= 8 && t.length <= 90)
+        .slice(0, 40)
+        .sort(() => Math.random() - 0.5)
+        .slice(0, 8);
+      writePersonaStats(stats, samples);
     }
     const profilesCreated: string[] = [];
     for (const chat of this.store.chatsWithMessageCounts(minMessages)) {
@@ -639,6 +651,87 @@ export class WaconService {
       mimetype: media.mimetype ?? "audio/ogg",
       note: "Si tu agente puede procesar audio, escúchalo directamente. Si no, configura un backend de transcripción (wacon doctor).",
     };
+  }
+
+  // ── stickers ─────────────────────────────────────────────
+
+  /** Build/refresh the sticker catalog: bundled packs + the user's own stickers. */
+  syncStickers(): { packImported: number; ownIndexed: number; habits: number } {
+    const packImported = importPack(this.store, "cats");
+    const { indexed, habits } = indexOwnStickers(this.store);
+    return { packImported, ownIndexed: indexed, habits };
+  }
+
+  listStickers(opts: { mood?: string; chat?: string; limit?: number } = {}) {
+    const stickers = this.store.listStickers({ mood: opts.mood, limit: opts.limit ?? 20 });
+    const result: {
+      stickers: typeof stickers;
+      moods: readonly string[];
+      affinity?: { stickersPerMessage: number; advice: string };
+      contactMoods?: { mood: string; count: number }[];
+    } = { stickers, moods: MOODS };
+    if (opts.chat) {
+      const jid = this.resolveChatJid(opts.chat);
+      result.affinity = stickerAffinity(this.store, jid);
+      result.contactMoods = this.store.stickerHabits(jid);
+    }
+    return result;
+  }
+
+  /**
+   * Send a sticker by library id. Own stickers are re-downloaded from their
+   * original message; pack stickers are read from disk. Same guardrails as text
+   * (rate limit, dry-run, allow/block lists) and anti-fraud degradation.
+   */
+  async sendSticker(chatJidOrPhone: string, stickerId: string, clientName = "mcp"): Promise<SendResult | Guided> {
+    const chatJid = normalizeJid(chatJidOrPhone);
+    const config = loadConfig();
+    const check = checkSend(config, this.store, chatJid);
+    if (!check.allowed) return { sent: false, dryRun: check.dryRun, messageId: null, reason: check.reason };
+
+    const sticker = this.store.getSticker(stickerId);
+    if (!sticker) {
+      return logError(
+        this.store,
+        { operation: "send_sticker", chatJid, error: `unknown sticker ${stickerId}`, client: clientName },
+        "No encontré ese sticker. Usa list_stickers para ver los disponibles, o manda el mensaje solo con texto."
+      );
+    }
+
+    let webp: Buffer;
+    try {
+      if (sticker.origin === "pack" && sticker.file_path) {
+        webp = readFileSync(sticker.file_path);
+      } else if (sticker.chat_jid && sticker.msg_id) {
+        const media = await fetchMedia(this.connection, sticker.chat_jid, sticker.msg_id, config.maxMediaBytes);
+        webp = media.buffer;
+      } else {
+        throw new Error("sticker has no source");
+      }
+    } catch (err) {
+      return logError(
+        this.store,
+        { operation: "send_sticker", chatJid, error: err, context: { stickerId }, client: clientName },
+        "No pude cargar ese sticker. Continúa con texto — no menciones el problema al contacto."
+      );
+    }
+
+    if (check.dryRun) {
+      this.store.logSent({ chatJid, text: `[sticker ${stickerId}]`, clientName, dryRun: true });
+      return { sent: false, dryRun: true, messageId: null, reason: "dryRun activo — sticker registrado pero NO enviado" };
+    }
+    try {
+      const { id } = await this.connection.sendSticker(chatJid, webp);
+      this.store.logSent({ chatJid, text: `[sticker ${stickerId}]`, clientName, dryRun: false });
+      this.store.markStickerUsed(stickerId);
+      return { sent: true, dryRun: false, messageId: id };
+    } catch (err) {
+      return logError(
+        this.store,
+        { operation: "send_sticker", chatJid, error: err, context: { stickerId }, client: clientName },
+        "No pude enviar el sticker. Si el mensaje importa, mándalo como texto."
+      );
+    }
   }
 
   errorLog(limit = 30, chatJid?: string): ErrorRow[] {

@@ -1,0 +1,88 @@
+{
+  "pack": "cats",
+  "title": "Gatitos",
+  "source": "Twemoji (https://github.com/jdecked/twemoji)",
+  "license": "CC-BY 4.0 — graphics by Twitter, Inc and other contributors",
+  "stickers": [
+    {
+      "id": "cats:risa",
+      "mood": "risa",
+      "file": "risa.webp",
+      "emoji": "😹",
+      "description": "gato llorando de risa",
+      "bytes": 22840
+    },
+    {
+      "id": "cats:carino",
+      "mood": "carino",
+      "file": "carino.webp",
+      "emoji": "😻",
+      "description": "gato con ojos de corazón",
+      "bytes": 19384
+    },
+    {
+      "id": "cats:saludo",
+      "mood": "saludo",
+      "file": "saludo.webp",
+      "emoji": "😺",
+      "description": "gato sonriente",
+      "bytes": 18408
+    },
+    {
+      "id": "cats:ok",
+      "mood": "ok",
+      "file": "ok.webp",
+      "emoji": "😸",
+      "description": "gato sonriendo con ojos felices",
+      "bytes": 21126
+    },
+    {
+      "id": "cats:travieso",
+      "mood": "travieso",
+      "file": "travieso.webp",
+      "emoji": "😼",
+      "description": "gato con sonrisa pícara",
+      "bytes": 18220
+    },
+    {
+      "id": "cats:beso",
+      "mood": "beso",
+      "file": "beso.webp",
+      "emoji": "😽",
+      "description": "gato dando un beso",
+      "bytes": 19342
+    },
+    {
+      "id": "cats:sorpresa",
+      "mood": "sorpresa",
+      "file": "sorpresa.webp",
+      "emoji": "🙀",
+      "description": "gato asustado/sorprendido",
+      "bytes": 18886
+    },
+    {
+      "id": "cats:disculpa",
+      "mood": "disculpa",
+      "file": "disculpa.webp",
+      "emoji": "😿",
+      "description": "gato llorando (pena, disculpa)",
+      "bytes": 19628
+    },
+    {
+      "id": "cats:molesto",
+      "mood": "molesto",
+      "file": "molesto.webp",
+      "emoji": "😾",
+      "description": "gato enfadado",
+      "bytes": 17634
+    },
+    {
+      "id": "cats:neutral",
+      "mood": "neutral",
+      "file": "neutral.webp",
+      "emoji": "🐱",
+      "description": "carita de gato",
+      "bytes": 16250
+    }
+  ]
+}

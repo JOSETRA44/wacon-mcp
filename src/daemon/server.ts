@@ -64,6 +64,9 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "listSuggestedEvents",
   "confirmSuggestedEvent",
   "dismissSuggestedEvent",
+  "syncStickers",
+  "listStickers",
+  "sendSticker",
   "logout",
 ]);
 

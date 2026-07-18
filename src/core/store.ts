@@ -280,6 +280,33 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks (done, due_ts);
 
+-- Sticker catalog. Two origins: 'own' = stickers the user actually sent
+-- (indexed from history, the most authentic option) and 'pack' = bundled
+-- openly-licensed packs. The mood column is what lets an agent pick one.
+CREATE TABLE IF NOT EXISTS sticker_library (
+  id TEXT PRIMARY KEY,          -- own:<chat>|<msgId>  or  cats:<mood>
+  origin TEXT NOT NULL,         -- own | pack
+  pack TEXT,
+  mood TEXT,
+  file_path TEXT,               -- for pack stickers (bundled webp)
+  chat_jid TEXT,                -- for own stickers (where to re-download from)
+  msg_id TEXT,
+  uses INTEGER NOT NULL DEFAULT 0,
+  last_used_at INTEGER,
+  description TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_stickers_mood ON sticker_library (mood, origin);
+
+-- Which moods the user expresses with stickers per contact, learned from the
+-- text right before each sticker they sent. Drives "would he even send one?".
+CREATE TABLE IF NOT EXISTS sticker_habits (
+  chat_jid TEXT NOT NULL,
+  mood TEXT NOT NULL,
+  count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (chat_jid, mood)
+);
+
 -- Actionable items the brute-force analyzer found in group chats (exams,
 -- deadlines...). SUGGESTIONS only — promoted to a real calendar event on
 -- confirmation, never auto-scheduled.
@@ -478,6 +505,25 @@ export class Store {
          ORDER BY timestamp DESC LIMIT ?`
       )
       .all(chatJid, limit) as MessageRow[];
+  }
+
+  /**
+   * Balanced sample of the user's outgoing messages for the GLOBAL persona:
+   * caps how much any single chat contributes, so one very heavy chat (an AI
+   * assistant, a work group) can't drown out how the user actually talks to
+   * people. Groups are excluded — group voice differs from 1:1 voice.
+   */
+  balancedOutgoingSample(perChatCap = 120, excludeJids: string[] = []): MessageRow[] {
+    const placeholders = excludeJids.length > 0 ? `AND chat_jid NOT IN (${excludeJids.map(() => "?").join(",")})` : "";
+    return this.db
+      .prepare(
+        `SELECT id, chat_jid, sender_jid, from_me, timestamp, text, message_type, quoted_id FROM (
+           SELECT *, ROW_NUMBER() OVER (PARTITION BY chat_jid ORDER BY timestamp DESC) rn
+           FROM messages
+           WHERE from_me = 1 AND text IS NOT NULL AND chat_jid NOT LIKE '%@g.us' ${placeholders}
+         ) WHERE rn <= ?`
+      )
+      .all(...excludeJids, perChatCap) as MessageRow[];
   }
 
   /** All outgoing messages across chats — for the global persona analysis. */
@@ -705,6 +751,78 @@ export class Store {
       last_ts: number;
       last_text: string | null;
     }[];
+  }
+
+  // ── sticker library ──────────────────────────────────────
+
+  upsertSticker(s: { id: string; origin: string; pack: string | null; mood: string | null; filePath: string | null; chatJid: string | null; msgId: string | null; description: string | null }): void {
+    this.db
+      .prepare(
+        `INSERT INTO sticker_library (id, origin, pack, mood, file_path, chat_jid, msg_id, description, created_at)
+         VALUES (@id, @origin, @pack, @mood, @filePath, @chatJid, @msgId, @description, @createdAt)
+         ON CONFLICT(id) DO UPDATE SET mood = excluded.mood, file_path = excluded.file_path, description = COALESCE(excluded.description, sticker_library.description)`
+      )
+      .run({ ...s, createdAt: Date.now() });
+  }
+
+  listStickers(opts: { mood?: string; origin?: string; limit?: number } = {}): {
+    id: string; origin: string; pack: string | null; mood: string | null; file_path: string | null; chat_jid: string | null; msg_id: string | null; uses: number; description: string | null;
+  }[] {
+    const where: string[] = [];
+    const args: unknown[] = [];
+    if (opts.mood) { where.push("mood = ?"); args.push(opts.mood); }
+    if (opts.origin) { where.push("origin = ?"); args.push(opts.origin); }
+    args.push(opts.limit ?? 30);
+    return this.db
+      .prepare(`SELECT * FROM sticker_library ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY uses DESC, origin ASC LIMIT ?`)
+      .all(...args) as ReturnType<Store["listStickers"]>;
+  }
+
+  getSticker(id: string): { id: string; origin: string; mood: string | null; file_path: string | null; chat_jid: string | null; msg_id: string | null } | null {
+    return (this.db.prepare(`SELECT id, origin, mood, file_path, chat_jid, msg_id FROM sticker_library WHERE id = ?`).get(id) as
+      | { id: string; origin: string; mood: string | null; file_path: string | null; chat_jid: string | null; msg_id: string | null }
+      | undefined) ?? null;
+  }
+
+  markStickerUsed(id: string): void {
+    this.db.prepare(`UPDATE sticker_library SET uses = uses + 1, last_used_at = ? WHERE id = ?`).run(Date.now(), id);
+  }
+
+  /** Stickers the user sent, with the text that preceded them (for mood inference). */
+  ownStickerMessages(limit = 2000): { chat_jid: string; msg_id: string; prev_text: string | null }[] {
+    return this.db
+      .prepare(
+        `SELECT m.chat_jid, m.id msg_id,
+           (SELECT p.text FROM messages p
+             WHERE p.chat_jid = m.chat_jid AND p.timestamp < m.timestamp AND p.text IS NOT NULL AND p.text NOT LIKE '[%'
+             ORDER BY p.timestamp DESC LIMIT 1) prev_text
+         FROM messages m
+         WHERE m.message_type = 'sticker' AND m.from_me = 1
+         ORDER BY m.timestamp DESC LIMIT ?`
+      )
+      .all(limit) as { chat_jid: string; msg_id: string; prev_text: string | null }[];
+  }
+
+  bumpStickerHabit(chatJid: string, mood: string): void {
+    this.db
+      .prepare(`INSERT INTO sticker_habits (chat_jid, mood, count) VALUES (?, ?, 1) ON CONFLICT(chat_jid, mood) DO UPDATE SET count = count + 1`)
+      .run(chatJid, mood);
+  }
+
+  stickerHabits(chatJid: string): { mood: string; count: number }[] {
+    return this.db.prepare(`SELECT mood, count FROM sticker_habits WHERE chat_jid = ? ORDER BY count DESC`).all(chatJid) as { mood: string; count: number }[];
+  }
+
+  /** How sticker-heavy the user is with this contact. */
+  stickerUsageFor(chatJid: string): { stickers: number; outgoing: number } {
+    const r = this.db
+      .prepare(
+        `SELECT COALESCE(SUM(CASE WHEN message_type='sticker' THEN 1 ELSE 0 END),0) stickers,
+                COUNT(*) outgoing
+         FROM messages WHERE chat_jid = ? AND from_me = 1`
+      )
+      .get(chatJid) as { stickers: number; outgoing: number } | undefined;
+    return r ?? { stickers: 0, outgoing: 0 };
   }
 
   // ── suggested events (brute-force actionables) ───────────

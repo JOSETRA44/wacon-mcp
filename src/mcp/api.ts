@@ -96,6 +96,9 @@ export interface WaconApi {
   listSuggestedEvents(status?: string, limit?: number): Promise<{ id: number; chat: string; chatName: string | null; title: string; when: string | null; raw: string | null }[]>;
   confirmSuggestedEvent(id: number, notifyBeforeMinutes?: number): Promise<{ confirmed: boolean; eventId?: number }>;
   dismissSuggestedEvent(id: number): Promise<{ dismissed: boolean }>;
+  syncStickers(): Promise<{ packImported: number; ownIndexed: number; habits: number }>;
+  listStickers(opts?: { mood?: string; chat?: string; limit?: number }): Promise<unknown>;
+  sendSticker(chat: string, stickerId: string, clientName: string): Promise<SendResult | Guided>;
   logout(): Promise<void>;
 }
 
@@ -157,6 +160,9 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
     listSuggestedEvents: async (status, limit) => service.listSuggestedEvents(status, limit),
     confirmSuggestedEvent: async (id, notifyBeforeMinutes) => service.confirmSuggestedEvent(id, notifyBeforeMinutes),
     dismissSuggestedEvent: async (id) => service.dismissSuggestedEvent(id),
+    syncStickers: async () => service.syncStickers(),
+    listStickers: async (opts) => service.listStickers(opts),
+    sendSticker: (chat, stickerId, clientName) => service.sendSticker(chat, stickerId, clientName),
     logout: () => service.logout(),
   };
 }

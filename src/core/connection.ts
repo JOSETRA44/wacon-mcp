@@ -198,6 +198,15 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
       }
       for (const contact of contacts) this.linkContact(contact);
       this.store.insertMessages(messages.map((m) => this.toRow(m)).filter((m): m is MessageRow => m !== null));
+      // History messages carry media too — without this, everything synced from
+      // history (stickers, images, audio) would have no downloadable stub.
+      for (const msg of messages) {
+        this.captureAltMapping(msg);
+        const row = this.toRow(msg);
+        if (!row) continue;
+        const { stub } = extractMedia(msg);
+        if (stub) this.store.upsertMedia({ chat_jid: row.chat_jid, msg_id: row.id, timestamp: row.timestamp, ...stub });
+      }
     });
 
     // Per-message alt keys are the richest mapping source (every 1:1 message
@@ -389,6 +398,13 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
       await socket.sendPresenceUpdate("paused", chatJid);
     }
     const result = await socket.sendMessage(chatJid, { text });
+    return { id: result?.key?.id ?? null };
+  }
+
+  /** Send a sticker (webp buffer) — WhatsApp renders it as a real sticker. */
+  async sendSticker(chatJid: string, webp: Buffer): Promise<{ id: string | null }> {
+    const socket = this.requireSocket();
+    const result = await socket.sendMessage(chatJid, { sticker: webp });
     return { id: result?.key?.id ?? null };
   }
 

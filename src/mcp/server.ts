@@ -719,6 +719,47 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
     async ({ limit, chat }) => json(await api.errorLog(limit, chat))
   );
 
+  // ── stickers ─────────────────────────────────────────────
+
+  server.registerTool(
+    "list_stickers",
+    {
+      title: "Available stickers + this contact's sticker habits",
+      description:
+        "List sendable stickers, optionally filtered by mood (risa, carino, saludo, ok, travieso, beso, sorpresa, disculpa, molesto, neutral). Two origins: 'own' = stickers the user really sent (most authentic — reuse these first) and 'pack' = bundled cat stickers. Pass `chat` to also get that contact's sticker AFFINITY (how often the user actually sends stickers there) and which moods they use with them — respect it: if the affinity is low, send text only.",
+      inputSchema: {
+        mood: z.enum(["risa", "carino", "saludo", "ok", "travieso", "beso", "sorpresa", "disculpa", "molesto", "neutral"]).optional(),
+        chat: z.string().optional().describe("Get affinity/habits for this contact"),
+        limit: z.number().int().min(1).max(50).default(20),
+      },
+    },
+    async ({ mood, chat, limit }) => json(await api.listStickers({ mood, chat, limit }))
+  );
+
+  server.registerTool(
+    "send_sticker",
+    {
+      title: "Send a sticker",
+      description:
+        "Send a sticker by its library id (from list_stickers). WHEN to use one: at the emotional beat of a conversation — closing a joke (risa), greeting (saludo), warmth (carino), acknowledging (ok), softening a no or an apology (disculpa). Check the contact's affinity first with list_stickers({chat}): mirror the user's real habit instead of sprinkling stickers. Never send one in a serious/logistical message unless the user's history shows they do. Respects the same guardrails as send_message (rate limit, dry-run, allowlist) and degrades with guidance on failure — if it fails, just continue in text.",
+      inputSchema: {
+        chat: z.string().describe("Chat JID or phone number"),
+        sticker_id: z.string().describe("Sticker id from list_stickers (e.g. 'cats:risa')"),
+      },
+    },
+    async ({ chat, sticker_id }) => json(await api.sendSticker(chat, sticker_id, clientLabel))
+  );
+
+  server.registerTool(
+    "sync_stickers",
+    {
+      title: "Rebuild the sticker catalog",
+      description: "Index the bundled packs and the stickers the user has sent (tagging each with the mood inferred from the text before it). Run once, or after a big history sync, so list_stickers has fresh options.",
+      inputSchema: {},
+    },
+    async () => json(await api.syncStickers())
+  );
+
   // ── time, calendar & tasks ───────────────────────────────
 
   server.registerTool(

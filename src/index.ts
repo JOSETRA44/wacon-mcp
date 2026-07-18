@@ -348,6 +348,41 @@ program
   });
 
 program
+  .command("stickers")
+  .description("Sticker library (own + cat pack) and per-contact habits")
+  .option("--sync", "rebuild the catalog", false)
+  .option("-m, --mood <mood>", "filter by mood")
+  .option("-c, --chat <chat>", "show affinity/habits for a contact")
+  .action(async (opts: { sync: boolean; mood?: string; chat?: string }) => {
+    try {
+      if (opts.sync) {
+        const r = await client.syncStickers();
+        console.log(pc.green(`✔ pack: ${r.packImported} · propios indexados: ${r.ownIndexed} · hábitos: ${r.habits}`));
+        return;
+      }
+      const r = (await client.listStickers({ mood: opts.mood, chat: opts.chat })) as {
+        stickers: { id: string; origin: string; mood: string | null; uses: number; description: string | null }[];
+        moods: string[];
+        affinity?: { stickersPerMessage: number; advice: string };
+        contactMoods?: { mood: string; count: number }[];
+      };
+      if (r.affinity) {
+        console.log(pc.bold(`Afinidad con ${opts.chat}: ${(r.affinity.stickersPerMessage * 100).toFixed(0)}% de tus mensajes`));
+        console.log(pc.dim(`  ${r.affinity.advice}`));
+        if (r.contactMoods?.length) console.log(pc.dim(`  moods que usas aquí: ${r.contactMoods.slice(0, 5).map((m) => `${m.mood}(${m.count})`).join(", ")}\n`));
+      }
+      for (const s of r.stickers) {
+        const tag = s.origin === "own" ? pc.green("[propio]") : pc.magenta("[pack]");
+        console.log(`${pc.cyan(s.id.padEnd(20))} ${tag} ${pc.yellow((s.mood ?? "—").padEnd(9))} ${pc.dim(s.description ?? "")}`);
+      }
+      if (r.stickers.length === 0) console.log(pc.dim("sin stickers — corre `wacon stickers --sync`"));
+      else console.log(pc.dim(`\nmoods: ${r.moods.join(", ")}`));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
   .command("suggested")
   .description("Actionable events found in groups (review, then confirm)")
   .option("--confirm <id>", "promote a suggestion to a calendar event")

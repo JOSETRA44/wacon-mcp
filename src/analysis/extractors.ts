@@ -1,5 +1,6 @@
 import type { MessageRow } from "../core/store.js";
 import type { FactCategory } from "../memory/facts.js";
+import { isAuthoredText } from "../memory/analyzer.js";
 
 /**
  * Rule-based (no-LLM) fact extraction. Spanish-first heuristics that pull
@@ -105,12 +106,20 @@ const RULES: Rule[] = [
     build: (m) => clause(m[1]!) && `no le gusta ${clause(m[1]!)}`,
     confidence: 0.4,
   },
-  // objetivos
+  // objetivos — deliberately strict. A loose version produced garbage like
+  // "objetivo: trabajar entonces no va alcanzar t" from "voy a trabajar
+  // entonces no va a alcanzar el tiempo", which is scheduling, not a goal.
+  // Require an explicit intention verb plus a bounded, meaningful complement.
   {
     category: "objetivos",
-    re: /\b(?:quiero|voy\s+a|planeo|pienso)\s+(viajar|estudiar|trabajar|mudarme|comprar|graduarme)\s+([a-záéíóúñ0-9 ]{0,25})/i,
-    build: (m) => `objetivo: ${clean(`${m[1]} ${m[2] ?? ""}`)}`,
-    confidence: 0.3,
+    re: /\b(?:quiero|planeo|mi\s+meta\s+es|estoy\s+ahorrando\s+para)\s+(viajar|estudiar|mudarme|comprar|graduarme|titularme|aprender)\b([a-záéíóúñ0-9 ]{0,20})/i,
+    build: (m) => {
+      const tail = clean(m[2] ?? "");
+      // Drop tails that are just connectors — they signal a subordinate clause.
+      if (/^(entonces|porque|pero|aunque|que|y)\b/i.test(tail)) return `objetivo: ${m[1]}`;
+      return `objetivo: ${clean(`${m[1]} ${tail}`)}`;
+    },
+    confidence: 0.35,
   },
 ];
 
@@ -122,7 +131,7 @@ export function extractFacts(incoming: MessageRow[]): CandidateFact[] {
   const found = new Map<string, CandidateFact>();
   for (const msg of incoming) {
     const text = msg.text;
-    if (!text || text.length < 6 || text.startsWith("[")) continue; // skip placeholders
+    if (!text || text.length < 6 || !isAuthoredText(text)) continue; // placeholders/code aren't statements about a person
     for (const rule of RULES) {
       // Regexes carry accented char classes + the `i` flag, so match raw text.
       const m = text.match(rule.re);

@@ -4,6 +4,15 @@ tags: [wacon, skill]
 
 # Skill para Agentes
 
+Dos skills, porque son **dos trabajos distintos**:
+
+| Skill | Trabajo |
+|---|---|
+| `wacon-whatsapp` | **Conversar**: leer, responder en la voz del usuario, stickers, proactividad |
+| `wacon-knowledge` | **Analizar**: construir/mantener la base de conocimiento (bulk analysis, bundles, hechos, episodios, persona) |
+
+Separarlas evita una skill gigante que mezcla dos modos mentales, y hace que cada una dispare en el contexto correcto.
+
 `skills/wacon-whatsapp/SKILL.md` — layout estándar instalable:
 
 - Con el CLI de skills: `npx skills add JOSETRA44/wacon-mcp` (el CLI detecta `skills/*/SKILL.md`)

@@ -4,7 +4,7 @@ tags: [wacon, mcp, tools]
 
 # Herramientas MCP
 
-54 tools, 2 resources, 1 prompt. Definidos una sola vez en `mcp/server.ts` contra la interfaz `WaconApi` (ver [[Arquitectura]]).
+57 tools, 2 resources, 1 prompt. Definidos una sola vez en `mcp/server.ts` contra la interfaz `WaconApi` (ver [[Arquitectura]]).
 
 ## Análisis automatizado — [[Analisis-Automatizado]]
 | Tool | Nota |
@@ -45,6 +45,7 @@ tags: [wacon, mcp, tools]
 ## Multimedia y proactividad — [[Multimedia-y-Proactividad]]
 | Tool | Nota |
 |---|---|
+| `list_stickers` / `send_sticker` / `sync_stickers` | ⭐ [[Stickers]]: candidatos por mood + afinidad del contacto |
 | `view_image` | Devuelve image block MCP (visión nativa); anti-fraude |
 | `transcribe_audio` | Audio block MCP (capa 1) o transcripción (capa 2); anti-fraude |
 | `get_error_log` | Errores internos registrados (no se filtran al chat) |

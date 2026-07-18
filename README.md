@@ -128,7 +128,20 @@ wacon init --courses    # solo grupos de cursos de la universidad
 wacon suggested         # accionables detectados; --confirm <id> para agendar
 ```
 
-## Herramientas MCP (54)
+## Stickers
+
+Donde tú pondrías un sticker, el agente ahora **elige uno y lo manda**:
+
+- **Tus propios stickers primero** (los que realmente enviaste, ya en webp), más un **pack de gatitos incluido** (10 webp 512×512 generados desde [Twemoji](https://github.com/jdecked/twemoji), CC-BY 4.0) como respaldo — sin dependencias de imagen en runtime.
+- **El significado se aprende del contexto, sin IA:** el texto anterior al sticker define su mood (tras "Perdón, me pasé" → `disculpa`; tras "jajaja" → `risa`).
+- **Cuándo enviarlo:** `list_stickers({chat})` mide tu **afinidad real** con ese contacto (con Nayda: 27% de tus mensajes son stickers → "encajan de forma natural"; si fuera <8%, el agente manda solo texto).
+
+```bash
+wacon stickers --sync        # indexa pack + tus stickers
+wacon stickers -c nayda      # afinidad y moods con ese contacto
+```
+
+## Herramientas MCP (57)
 
 **Sesión**: `whatsapp_status`, `whatsapp_login` (QR como imagen)
 **Lectura**: `list_chats`, `read_messages`, `search_messages`, `recall_context` (híbrido), `search_contacts`, `get_group_info`
@@ -136,6 +149,7 @@ wacon suggested         # accionables detectados; --confirm <id> para agendar
 **Memoria**: `get_contact_profile`, `update_contact_profile`, `analyze_contact`, `get_persona`, `list_episodes`, `read_episode`, `summarize_episode`, `wacon_init`
 **Inteligencia**: `prepare_reply`, `remember_fact`, `forget_fact`, `get_contact_facts`, `tag_chat`, `untag_chat`, `list_special_chats`, `consult_playbook`, `wacon_doctor`
 **Análisis**: `run_bulk_analysis`, `analysis_status`, `get_analysis_bundle`, `list_suggested_events`, `confirm_suggested_event`, `dismiss_suggested_event`, `resolve_contact`, `list_analysis_targets`
+**Stickers**: `list_stickers`, `send_sticker`, `sync_stickers`
 **Multimedia**: `view_image`, `transcribe_audio`, `get_error_log`
 **Tiempo/agenda**: `schedule_event`, `list_events`, `cancel_event`, `complete_event`, `add_task`, `list_tasks`, `complete_task`, `get_agenda`, `wait_for_triggers`
 **Envío**: `send_message` (con `typing_ms` para simular "escribiendo…")
@@ -144,7 +158,18 @@ Más resources (`wacon://persona`, `wacon://profile/{chat}`) y el prompt `reply_
 
 ## Skill para agentes
 
-En `skills/wacon-whatsapp/` hay una skill con el workflow completo. Instalación: `npx skills add JOSETRA44/wacon-mcp` o copia la carpeta a `~/.claude/skills/`. La skill también viaja dentro del paquete npm (`node_modules/wacon/skills/`).
+Dos skills, una por trabajo:
+
+- **`wacon-whatsapp`** — conversar: leer, responder en tu voz, stickers, proactividad.
+- **`wacon-knowledge`** — analizar: construir y mantener la base de conocimiento (análisis masivo, bundles, hechos, episodios, persona).
+
+Instalación: `npx skills add JOSETRA44/wacon-mcp` o copia las carpetas a `~/.claude/skills/`. Viajan dentro del paquete npm (`node_modules/wacon/skills/`).
+
+## Calidad de datos
+
+La personalización solo sirve si mide bien. Wacon distingue **tu prosa real** del ruido: descarta sus propios placeholders de media, código/SQL pegado y links sueltos; quita las URLs antes de extraer vocabulario; y equilibra el muestreo por chat para que un chat pesado (un bot, un grupo enorme) no defina tu voz. Eso bajó tu longitud media medida de 162 a 53 caracteres y cambió tus "frases recurrentes" de `"not null"`/`"message id"` a `"buenas noches"`/`"muchas gracias"`. Detalle en `wacon-docs/Calidad-de-Datos.md`.
+
+Tu `persona.md` ya no nace vacía: `wacon init` redacta un borrador **con evidencia** (tono, longitud, cómo te ríes, tildes, abreviaciones y ejemplos de mensajes tuyos reales) que luego editas a mano — `wacon doctor` te avisa si sigue en blanco.
 
 ## Documentación de diseño
 
