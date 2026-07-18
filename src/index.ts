@@ -161,6 +161,43 @@ program
   });
 
 program
+  .command("resolve <query>")
+  .description("Resolve a name/number/JID to the real chat(s) with messages (@lid-aware)")
+  .action(async (query: string) => {
+    try {
+      const hits = await client.resolveContact(query);
+      if (hits.length === 0) {
+        console.log(pc.dim("sin coincidencias con mensajes"));
+        return;
+      }
+      for (const h of hits) {
+        console.log(`${pc.bold(h.displayName ?? "(sin nombre)")} ${pc.cyan(h.jid)}`);
+        console.log(pc.dim(`   ${h.total} msgs (${h.outgoing} tuyos) · vía ${h.via}`));
+      }
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("targets")
+  .description("Ranked worklist of chats worth analyzing (for building the knowledge base)")
+  .option("-n, --limit <n>", "how many", "25")
+  .action(async (opts: { limit: string }) => {
+    try {
+      const rows = await client.analysisTargets(Number(opts.limit));
+      for (const r of rows) {
+        const tag = r.isGroup ? pc.magenta("[grupo]") : "";
+        const facts = r.hasFacts ? pc.green("✓hechos") : pc.dim("sin hechos");
+        console.log(`${pc.bold(r.displayName ?? "(sin nombre)")} ${tag} ${facts}`);
+        console.log(pc.dim(`   ${r.jid} · ${r.total} msgs (${r.outgoing} tuyos)`));
+      }
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
   .command("contacts <query>")
   .description("Find contacts/groups by name or number")
   .action(async (query: string) => {

@@ -185,7 +185,8 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
       }
     });
 
-    socket.ev.on("messaging-history.set", ({ chats, contacts, messages }) => {
+    socket.ev.on("messaging-history.set", ({ chats, contacts, messages, lidPnMappings }) => {
+      for (const m of lidPnMappings ?? []) this.store.mapJids(m.lid, m.pn);
       for (const chat of chats) {
         if (!chat.id) continue;
         this.store.upsertChat({
@@ -195,10 +196,14 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
           lastMessageTs: chat.conversationTimestamp ? toMillis(chat.conversationTimestamp) : null,
         });
       }
-      for (const contact of contacts) {
-        this.store.upsertContact({ jid: contact.id, name: contact.name ?? null, notifyName: contact.notify ?? null });
-      }
+      for (const contact of contacts) this.linkContact(contact);
       this.store.insertMessages(messages.map((m) => this.toRow(m)).filter((m): m is MessageRow => m !== null));
+    });
+
+    // Per-message alt keys are the richest mapping source (every 1:1 message
+    // carries the counterpart address). Capture them before anything else.
+    socket.ev.on("lid-mapping.update", (m) => {
+      if (m?.lid && m?.pn) this.store.mapJids(m.lid, m.pn);
     });
 
     socket.ev.on("chats.upsert", (chats) => {
@@ -214,13 +219,12 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
     });
 
     socket.ev.on("contacts.upsert", (contacts) => {
-      for (const contact of contacts) {
-        this.store.upsertContact({ jid: contact.id, name: contact.name ?? null, notifyName: contact.notify ?? null });
-      }
+      for (const contact of contacts) this.linkContact(contact);
     });
 
     socket.ev.on("messages.upsert", ({ messages }) => {
       for (const msg of messages) {
+        this.captureAltMapping(msg);
         const row = this.toRow(msg);
         if (!row) continue;
         this.store.insertMessage(row);
@@ -238,6 +242,39 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
         this.emit("message", row);
       }
     });
+  }
+
+  /**
+   * Store a contact under BOTH its phone JID and its @lid, map them, and give
+   * the @lid chat the contact's name — so an agent can find "Nayda" whether
+   * they pass her number, her @lid, or her name.
+   */
+  private linkContact(contact: { id?: string; lid?: string; phoneNumber?: string; name?: string | null; notify?: string | null }): void {
+    const name = contact.name ?? null;
+    const notify = contact.notify ?? null;
+    const pn = contact.phoneNumber ?? (contact.id?.endsWith("@s.whatsapp.net") ? contact.id : undefined);
+    const lid = contact.lid ?? (contact.id?.endsWith("@lid") ? contact.id : undefined);
+    if (contact.id) this.store.upsertContact({ jid: contact.id, name, notifyName: notify });
+    if (pn && lid) {
+      this.store.mapJids(lid, pn);
+      // Mirror the name onto both identities and onto the @lid chat.
+      this.store.upsertContact({ jid: pn, name, notifyName: notify });
+      this.store.upsertContact({ jid: lid, name, notifyName: notify });
+      if (name) this.store.upsertChat({ jid: lid, name });
+    }
+  }
+
+  /** Every 1:1 message carries the counterpart address in key.remoteJidAlt. */
+  private captureAltMapping(msg: WAMessage): void {
+    const key = msg.key as { remoteJid?: string; remoteJidAlt?: string; participant?: string; participantAlt?: string };
+    const pair = (a?: string, b?: string) => {
+      if (!a || !b) return;
+      const lid = a.endsWith("@lid") ? a : b.endsWith("@lid") ? b : null;
+      const pn = a.endsWith("@s.whatsapp.net") ? a : b.endsWith("@s.whatsapp.net") ? b : null;
+      if (lid && pn) this.store.mapJids(lid, pn);
+    };
+    pair(key.remoteJid, key.remoteJidAlt);
+    pair(key.participant, key.participantAlt);
   }
 
   private cacheMessage(chatJid: string, id: string, msg: WAMessage): void {

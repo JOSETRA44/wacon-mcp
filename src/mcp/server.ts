@@ -231,6 +231,28 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
   );
 
   server.registerTool(
+    "resolve_contact",
+    {
+      title: "Resolve a name/number to the real chat",
+      description:
+        "IMPORTANT for analysis: WhatsApp stores 1:1 chats under a privacy '@lid', NOT the phone number, so passing a contact's number or a name may not directly hit their messages. This resolves a name, phone number, or JID to the chat JID(s) that ACTUALLY hold messages, with message counts. Use it when read_messages/get_contact_profile come back empty for someone you know exists, or before deep-analyzing a contact. Most memory/read tools already resolve internally, but this lets you confirm the exact JID.",
+      inputSchema: { query: z.string().min(2).describe("A contact name, phone number, or JID") },
+    },
+    async ({ query }) => json(await api.resolveContact(query))
+  );
+
+  server.registerTool(
+    "list_analysis_targets",
+    {
+      title: "Ranked worklist for building the knowledge base",
+      description:
+        "Returns the chats most worth analyzing (ranked by how much the user writes there), each with its resolved display name, message counts, whether it's a group, and whether facts already exist. Use this to plan deep analysis — start with high-outgoing 1:1 chats that have no facts yet. Groups are included; skip low-value ones (sales, games) and focus on people and relevant groups.",
+      inputSchema: { limit: z.number().int().min(1).max(100).default(25) },
+    },
+    async ({ limit }) => json(await api.analysisTargets(limit))
+  );
+
+  server.registerTool(
     "search_contacts",
     {
       title: "Find a contact or group",

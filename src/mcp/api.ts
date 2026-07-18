@@ -88,6 +88,8 @@ export interface WaconApi {
   completeTask(id: number): Promise<{ done: boolean }>;
   getAgenda(withinDays?: number): Promise<unknown>;
   waitForTriggers(opts: { sinceMsg?: number; sinceTrigger?: number; timeoutSeconds?: number }): Promise<unknown>;
+  resolveContact(query: string): Promise<{ jid: string; displayName: string | null; total: number; outgoing: number; via: string }[]>;
+  analysisTargets(limit?: number): Promise<{ jid: string; displayName: string | null; total: number; outgoing: number; isGroup: boolean; hasFacts: boolean }[]>;
   logout(): Promise<void>;
 }
 
@@ -141,6 +143,8 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
     completeTask: async (id) => service.completeTask(id),
     getAgenda: async (withinDays) => service.getAgenda(withinDays),
     waitForTriggers: (opts) => service.waitForTriggers(opts),
+    resolveContact: async (query) => service.resolveContact(query),
+    analysisTargets: async (limit) => service.analysisTargets(limit),
     logout: () => service.logout(),
   };
 }

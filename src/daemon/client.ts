@@ -167,6 +167,12 @@ export class DaemonClient implements WaconApi {
   waitForTriggers(opts: Parameters<WaconApi["waitForTriggers"]>[0]): ReturnType<WaconApi["waitForTriggers"]> {
     return this.rpc("waitForTriggers", [opts], 150_000);
   }
+  resolveContact(query: string): ReturnType<WaconApi["resolveContact"]> {
+    return this.rpc("resolveContact", [query]);
+  }
+  analysisTargets(limit?: number): ReturnType<WaconApi["analysisTargets"]> {
+    return this.rpc("analysisTargets", [limit]);
+  }
   async logout(): Promise<void> {
     await this.rpc("logout");
   }

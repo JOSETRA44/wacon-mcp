@@ -56,6 +56,8 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "completeTask",
   "getAgenda",
   "waitForTriggers",
+  "resolveContact",
+  "analysisTargets",
   "logout",
 ]);
 
@@ -159,6 +161,9 @@ export async function runDaemon(): Promise<void> {
 
   const indexed = store.backfillVectors();
   if (indexed > 0) console.log(`[wacon] memory index: vectorized ${indexed} messages`);
+
+  const linked = store.backfillJidMapFromGreetings();
+  if (linked > 0) console.log(`[wacon] @lid map: linked ${linked} contacts to their chats`);
 
   service.scheduler.start();
   console.log(`[wacon] proactive scheduler started`);

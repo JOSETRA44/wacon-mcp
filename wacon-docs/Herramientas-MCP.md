@@ -4,7 +4,7 @@ tags: [wacon, mcp, tools]
 
 # Herramientas MCP
 
-46 tools, 2 resources, 1 prompt. Definidos una sola vez en `mcp/server.ts` contra la interfaz `WaconApi` (ver [[Arquitectura]]).
+48 tools, 2 resources, 1 prompt. Definidos una sola vez en `mcp/server.ts` contra la interfaz `WaconApi` (ver [[Arquitectura]]).
 
 ## Sesión
 | Tool | Nota |
@@ -20,6 +20,8 @@ tags: [wacon, mcp, tools]
 | `search_messages` | FTS5 keyword exacto |
 | `recall_context` | ⭐ [[RAG-Hibrido]] — el retrieval preferido |
 | `search_contacts` | Nombre/número → JID |
+| `resolve_contact` | ⭐ Nombre/número/JID → chat real con mensajes (resuelve el split `@lid`) |
+| `list_analysis_targets` | Lista de trabajo priorizada para construir la base de conocimiento |
 | `get_group_info` | Participantes + admins |
 
 ## Atención (ahorro de tokens) — [[Atencion-y-Tokens]]

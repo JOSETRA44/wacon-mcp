@@ -103,25 +103,46 @@ export class WaconService {
     return this.connection.state === "waiting_qr" ? this.connection.latestQr : null;
   }
 
+  /**
+   * Resolve any name / phone / JID to the chat JID that actually holds the
+   * messages — transparently crossing the @lid ↔ phone split. Analysis and
+   * read methods run inputs through this so agents never hit the "no messages
+   * for <number>" trap that comes from WhatsApp's privacy addressing.
+   */
+  private resolveChatJid(input: string): string {
+    const direct = normalizeJid(input);
+    const hits = this.store.resolveChat(input);
+    if (hits.length === 0) return direct;
+    return hits.find((h) => h.jid === direct)?.jid ?? hits[0]!.jid;
+  }
+
+  resolveContact(query: string) {
+    return this.store.resolveChat(query);
+  }
+
+  analysisTargets(limit = 25) {
+    return this.store.analysisTargets(limit);
+  }
+
   listChats(limit = 30) {
     return this.store.listChats(limit);
   }
 
   readMessages(chatJid: string, limit = 30, beforeTs?: number): MessageRow[] {
-    return this.store.readMessages(normalizeJid(chatJid), limit, beforeTs);
+    return this.store.readMessages(this.resolveChatJid(chatJid), limit, beforeTs);
   }
 
   searchMessages(query: string, chatJid?: string, limit = 20) {
-    return this.store.searchMessages(query, { chatJid: chatJid ? normalizeJid(chatJid) : undefined, limit });
+    return this.store.searchMessages(query, { chatJid: chatJid ? this.resolveChatJid(chatJid) : undefined, limit });
   }
 
   /** Hybrid memory retrieval: keyword (BM25) + semantic (hashed vectors) + recency, RRF-fused, plus matching episode summaries. */
   recall(query: string, chatJid?: string, limit = 12): RecallResult {
-    return recall(this.store, query, { chatJid: chatJid ? normalizeJid(chatJid) : undefined, limit });
+    return recall(this.store, query, { chatJid: chatJid ? this.resolveChatJid(chatJid) : undefined, limit });
   }
 
   listEpisodes(chatJid: string, limit = 20) {
-    const jid = normalizeJid(chatJid);
+    const jid = this.resolveChatJid(chatJid);
     this.store.rebuildEpisodes(jid);
     return this.store.listEpisodes(jid, limit);
   }
@@ -246,7 +267,7 @@ export class WaconService {
   }
 
   async markRead(chatJidOrPhone: string, limit = 20): Promise<{ marked: number }> {
-    const chatJid = normalizeJid(chatJidOrPhone);
+    const chatJid = this.resolveChatJid(chatJidOrPhone);
     const unread = this.store
       .readMessages(chatJid, limit)
       .filter((m) => !m.from_me)
@@ -273,7 +294,7 @@ export class WaconService {
     factGaps: { category: string; prompt: string }[];
     tags: string[];
   } {
-    const jid = normalizeJid(jidOrPhone);
+    const jid = this.resolveChatJid(jidOrPhone);
     let profile = readProfile(jid);
     if (!profile || !profile.stats) {
       const outgoing = this.store.outgoingMessages(jid);
@@ -290,18 +311,18 @@ export class WaconService {
   // ── contact facts (dimension 1) ──────────────────────────
 
   rememberFact(jidOrPhone: string, category: string, fact: string, confidence?: number, sourceMsgId?: string | null): { id: number; updated: boolean; category: FactCategory } {
-    const jid = normalizeJid(jidOrPhone);
+    const jid = this.resolveChatJid(jidOrPhone);
     const cat = normalizeCategory(category);
     const res = this.store.upsertFact({ jid, category: cat, fact, confidence, sourceMsgId });
     return { ...res, category: cat };
   }
 
   forgetFact(jidOrPhone: string, factId: number): { removed: boolean } {
-    return { removed: this.store.deleteFact(factId, normalizeJid(jidOrPhone)) };
+    return { removed: this.store.deleteFact(factId, this.resolveChatJid(jidOrPhone)) };
   }
 
   getFacts(jidOrPhone: string): { facts: FactRow[]; gaps: { category: string; prompt: string }[] } {
-    const jid = normalizeJid(jidOrPhone);
+    const jid = this.resolveChatJid(jidOrPhone);
     const facts = this.store.listFacts(jid);
     return { facts, gaps: factGaps(facts) };
   }
@@ -309,13 +330,13 @@ export class WaconService {
   // ── special chats & playbook (dimension: external knowledge) ──
 
   tagChat(jidOrPhone: string, tag: string): { tags: string[] } {
-    const jid = normalizeJid(jidOrPhone);
+    const jid = this.resolveChatJid(jidOrPhone);
     this.store.tagChat(jid, tag);
     return { tags: this.store.chatTags(jid) };
   }
 
   untagChat(jidOrPhone: string, tag: string): { removed: boolean; tags: string[] } {
-    const jid = normalizeJid(jidOrPhone);
+    const jid = this.resolveChatJid(jidOrPhone);
     const removed = this.store.untagChat(jid, tag);
     return { removed, tags: this.store.chatTags(jid) };
   }
@@ -326,7 +347,7 @@ export class WaconService {
 
   /** Consult the external playbook for a tagged chat. Shows "composing" while it thinks. */
   async consultPlaybook(jidOrPhone: string, situation: string): Promise<PlaybookResult> {
-    const jid = normalizeJid(jidOrPhone);
+    const jid = this.resolveChatJid(jidOrPhone);
     if (this.connection.state === "connected") {
       await this.connection.setPresence("composing", jid).catch(() => undefined);
     }
@@ -362,7 +383,7 @@ export class WaconService {
     recall: RecallResult | null;
     playbook: PlaybookResult;
   }> {
-    const jid = normalizeJid(jidOrPhone);
+    const jid = this.resolveChatJid(jidOrPhone);
     if (this.connection.state === "connected") {
       await this.connection.setPresence("composing", jid).catch(() => undefined);
     }
@@ -411,12 +432,12 @@ export class WaconService {
   }
 
   observe(jidOrPhone: string, section: ProfileSection, observation: string): void {
-    const jid = normalizeJid(jidOrPhone);
+    const jid = this.resolveChatJid(jidOrPhone);
     appendObservation(jid, section, observation, this.store.resolveDisplayName(jid));
   }
 
   analyzeContact(jidOrPhone: string): { stats: StyleStats; summary: string } {
-    const jid = normalizeJid(jidOrPhone);
+    const jid = this.resolveChatJid(jidOrPhone);
     const outgoing = this.store.outgoingMessages(jid);
     if (outgoing.length === 0) {
       throw new Error(`No outgoing messages found for ${jid}. Sync more history or check the JID.`);
@@ -464,7 +485,7 @@ export class WaconService {
     | { ok: true; base64: string; mimetype: string; description: string | null }
     | Guided
   > {
-    const chatJid = normalizeJid(chatJidOrPhone);
+    const chatJid = this.resolveChatJid(chatJidOrPhone);
     const config = loadConfig();
     try {
       const media = await fetchMedia(this.connection, chatJid, msgId, config.maxMediaBytes);
@@ -513,7 +534,7 @@ export class WaconService {
     | { ok: true; mode: "audio-block"; base64: string; mimetype: string; note: string }
     | Guided
   > {
-    const chatJid = normalizeJid(chatJidOrPhone);
+    const chatJid = this.resolveChatJid(chatJidOrPhone);
     const config = loadConfig();
     let media;
     try {

@@ -279,6 +279,16 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_done ON tasks (done, due_ts);
+
+-- WhatsApp privacy: 1:1 chats live under a @lid, not the phone number. This
+-- maps between them so a contact named/numbered by an agent resolves to the
+-- chat that actually holds the messages. Fed from message alt-keys, contacts,
+-- and lid-mapping events.
+CREATE TABLE IF NOT EXISTS jid_map (
+  lid TEXT PRIMARY KEY,
+  pn TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_jidmap_pn ON jid_map (pn);
 `;
 
 export class Store {
@@ -360,15 +370,23 @@ export class Store {
   }
 
   resolveDisplayName(jid: string): string | null {
-    const row = this.db
-      .prepare(
-        `SELECT COALESCE(c.name, ct.name, ct.notify_name) AS display_name
-         FROM (SELECT ? AS jid) j
-         LEFT JOIN chats c ON c.jid = j.jid
-         LEFT JOIN contacts ct ON ct.jid = j.jid`
-      )
-      .get(jid) as { display_name: string | null } | undefined;
-    return row?.display_name ?? null;
+    const lookup = (j: string): string | null => {
+      const row = this.db
+        .prepare(
+          `SELECT COALESCE(c.name, ct.name, ct.notify_name) AS display_name
+           FROM (SELECT ? AS jid) x
+           LEFT JOIN chats c ON c.jid = x.jid
+           LEFT JOIN contacts ct ON ct.jid = x.jid`
+        )
+        .get(j) as { display_name: string | null } | undefined;
+      return row?.display_name ?? null;
+    };
+    // Direct name, or — for a @lid chat with no name — the name saved under its
+    // mapped phone number (and vice versa).
+    const direct = lookup(jid);
+    if (direct) return direct;
+    const alt = jid.endsWith("@lid") ? this.pnForLid(jid) : this.lidForPn(jid);
+    return alt ? lookup(alt) : null;
   }
 
   // ── messages ─────────────────────────────────────────────
@@ -671,6 +689,154 @@ export class Store {
       last_ts: number;
       last_text: string | null;
     }[];
+  }
+
+  // ── LID ↔ phone mapping & chat resolution ────────────────
+
+  mapJids(lid: string, pn: string): void {
+    if (!lid.endsWith("@lid") || !pn.includes("@")) return;
+    this.db.prepare(`INSERT INTO jid_map (lid, pn) VALUES (?, ?) ON CONFLICT(lid) DO UPDATE SET pn = excluded.pn`).run(lid, pn);
+  }
+
+  lidForPn(pn: string): string | null {
+    return (this.db.prepare(`SELECT lid FROM jid_map WHERE pn = ?`).get(pn) as { lid: string } | undefined)?.lid ?? null;
+  }
+
+  pnForLid(lid: string): string | null {
+    return (this.db.prepare(`SELECT pn FROM jid_map WHERE lid = ?`).get(lid) as { pn: string } | undefined)?.pn ?? null;
+  }
+
+  private messageCount(jid: string): { total: number; outgoing: number } {
+    return (
+      (this.db.prepare(`SELECT COUNT(*) total, COALESCE(SUM(from_me),0) outgoing FROM messages WHERE chat_jid = ?`).get(jid) as
+        | { total: number; outgoing: number }
+        | undefined) ?? { total: 0, outgoing: 0 }
+    );
+  }
+
+  /**
+   * Resolve a name / phone / JID to the chat JID(s) that actually hold messages.
+   * Codifies the manual work needed because of the @lid privacy split:
+   *   1. direct JID with messages,
+   *   2. the mapped counterpart (lid↔pn),
+   *   3. contacts matching by name/number → their jids + mapped lids,
+   *   4. last resort: FTS the name in the user's own outgoing greetings.
+   */
+  resolveChat(query: string): { jid: string; displayName: string | null; total: number; outgoing: number; via: string }[] {
+    // Each candidate carries a confidence weight; explicit id/number/contact
+    // matches outrank the fuzzy greeting fallback, and among greetings the one
+    // you address by name most often wins (that's the person, not a mention).
+    const candidates = new Map<string, { via: string; weight: number }>();
+    const add = (jid: string | null | undefined, via: string, weight: number) => {
+      if (!jid) return;
+      const prev = candidates.get(jid);
+      if (!prev || weight > prev.weight) candidates.set(jid, { via, weight });
+    };
+    const q = query.trim();
+
+    if (q.includes("@")) {
+      add(q, "direct", 1000);
+      add(this.pnForLid(q), "map:lid→pn", 950);
+      add(this.lidForPn(q), "map:pn→lid", 950);
+    } else if (/^\+?[\d\s-]{6,}$/.test(q)) {
+      const pn = `${q.replace(/[^\d]/g, "")}@s.whatsapp.net`;
+      add(pn, "phone", 900);
+      add(this.lidForPn(pn), "phone→lid", 950);
+    }
+
+    if (!q.includes("@")) {
+      const like = `%${q.replace(/[%_]/g, "")}%`;
+      const contacts = this.db
+        .prepare(`SELECT jid FROM contacts WHERE name LIKE ? OR notify_name LIKE ? LIMIT 10`)
+        .all(like, like) as { jid: string }[];
+      for (const c of contacts) {
+        add(c.jid, "name→contact", 800);
+        add(this.lidForPn(c.jid), "name→contact→lid", 850);
+      }
+      for (const c of this.db.prepare(`SELECT jid FROM chats WHERE name LIKE ? LIMIT 10`).all(like) as { jid: string }[]) {
+        add(c.jid, "name→chat", 700);
+      }
+
+      // FTS fallback: chats where the user addresses this name in OUTGOING text.
+      // Rank by how often — you greet a real contact by name repeatedly, but
+      // only mention someone in passing once elsewhere.
+      const ftsName = q.split(/\s+/)[0];
+      if (ftsName && ftsName.length >= 3) {
+        try {
+          const hits = this.db
+            .prepare(
+              `SELECT m.chat_jid, COUNT(*) n FROM messages_fts f JOIN messages m ON m.rowid=f.rowid
+               WHERE messages_fts MATCH ? AND m.from_me=1 GROUP BY m.chat_jid ORDER BY n DESC LIMIT 10`
+            )
+            .all(`"${ftsName.replace(/"/g, "")}"`) as { chat_jid: string; n: number }[];
+          for (const h of hits) add(h.chat_jid, `fts:greeting×${h.n}`, 100 + h.n);
+        } catch {
+          // FTS syntax guard
+        }
+      }
+    }
+
+    return [...candidates.entries()]
+      .map(([jid, { via, weight }]) => ({ jid, via, weight, ...this.messageCount(jid), displayName: this.resolveDisplayName(jid) }))
+      .filter((r) => r.total > 0)
+      .sort((a, b) => b.weight - a.weight || b.total - a.total)
+      .map(({ weight, ...r }) => r);
+  }
+
+  /**
+   * One-time opportunistic backfill for history captured before per-message
+   * alt-key mapping existed: for each named contact, find the @lid chat where
+   * the user greets that first name repeatedly and (conservatively) persist the
+   * phone↔lid link + mirror the name onto the @lid chat. Idempotent.
+   */
+  backfillJidMapFromGreetings(): number {
+    const contacts = this.db
+      .prepare(`SELECT jid, name FROM contacts WHERE name IS NOT NULL AND jid LIKE '%@s.whatsapp.net'`)
+      .all() as { jid: string; name: string }[];
+    let mapped = 0;
+    const findLid = this.db.prepare(
+      `SELECT m.chat_jid j, COUNT(*) n FROM messages_fts f JOIN messages m ON m.rowid=f.rowid
+       WHERE messages_fts MATCH ? AND m.from_me=1 AND m.chat_jid LIKE '%@lid'
+       GROUP BY m.chat_jid ORDER BY n DESC LIMIT 2`
+    );
+    for (const c of contacts) {
+      if (this.lidForPn(c.jid)) continue; // already mapped
+      const first = c.name.trim().split(/\s+/)[0];
+      if (!first || first.length < 3) continue;
+      let rows: { j: string; n: number }[] = [];
+      try {
+        rows = findLid.all(`"${first.replace(/"/g, "")}"`) as { j: string; n: number }[];
+      } catch {
+        continue;
+      }
+      // Strong, unambiguous signal only: greeted ≥3× and clearly ahead of #2.
+      const top = rows[0];
+      if (!top || top.n < 3) continue;
+      if (rows[1] && rows[1].n * 2 > top.n) continue;
+      this.mapJids(top.j, c.jid);
+      this.upsertContact({ jid: top.j, name: c.name });
+      this.upsertChat({ jid: top.j, name: c.name });
+      mapped++;
+    }
+    return mapped;
+  }
+
+  /** Ranked worklist for agents building the knowledge base: who's worth analyzing. */
+  analysisTargets(limit = 25): { jid: string; displayName: string | null; total: number; outgoing: number; isGroup: boolean; hasFacts: boolean }[] {
+    const rows = this.db
+      .prepare(
+        `SELECT m.chat_jid jid, COUNT(*) total, COALESCE(SUM(m.from_me),0) outgoing
+         FROM messages m GROUP BY m.chat_jid HAVING outgoing >= 15 ORDER BY outgoing DESC LIMIT ?`
+      )
+      .all(limit) as { jid: string; total: number; outgoing: number }[];
+    return rows.map((r) => ({
+      jid: r.jid,
+      displayName: this.resolveDisplayName(r.jid),
+      total: r.total,
+      outgoing: r.outgoing,
+      isGroup: r.jid.endsWith("@g.us"),
+      hasFacts: (this.db.prepare(`SELECT 1 FROM contact_facts WHERE jid = ? LIMIT 1`).get(r.jid) as unknown) !== undefined,
+    }));
   }
 
   // ── contact facts (memory dimension 1) ───────────────────
