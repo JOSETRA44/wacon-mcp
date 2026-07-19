@@ -421,6 +421,13 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
     }
   }
 
+  /** Send arbitrary media (image/video/audio/document) already shaped for Baileys. */
+  async sendMedia(chatJid: string, content: Record<string, unknown>): Promise<{ id: string | null }> {
+    const socket = this.requireSocket();
+    const result = await socket.sendMessage(chatJid, content as never);
+    return { id: result?.key?.id ?? null };
+  }
+
   /** Send a sticker (webp buffer) — WhatsApp renders it as a real sticker. */
   async sendSticker(chatJid: string, webp: Buffer): Promise<{ id: string | null }> {
     const socket = this.requireSocket();

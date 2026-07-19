@@ -73,6 +73,7 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "syncStickers",
   "listStickers",
   "sendSticker",
+  "sendFile",
   "logout",
 ]);
 

@@ -19,6 +19,7 @@ import { pendingReplies, openCommitments } from "../analysis/productivity.js";
 import { logError, GUIDANCE, type Guided } from "./errors.js";
 import { fetchMedia } from "../media/media.js";
 import { transcribe } from "../media/transcription.js";
+import { prepareMedia, toMessageContent } from "../media/send-media.js";
 import { importPack, indexOwnStickers, stickerAffinity, MOODS } from "../media/stickers.js";
 import type { FactRow, EventRow, TaskRow, ErrorRow } from "./store.js";
 
@@ -735,6 +736,53 @@ export class WaconService {
         hasProfile: readProfile(m.sender_jid) !== null,
       })),
     };
+  }
+
+  /**
+   * Send any file — image, video, audio (optionally as a voice note), or a
+   * document like a PDF. The kind is inferred from the extension. Same
+   * guardrails as text, and failures degrade with guidance instead of throwing.
+   */
+  async sendFile(
+    chatJidOrPhone: string,
+    filePath: string,
+    opts: { caption?: string; asVoiceNote?: boolean; clientName?: string } = {}
+  ): Promise<(SendResult & { kind?: string; fileName?: string }) | Guided> {
+    const chatJid = normalizeJid(chatJidOrPhone);
+    const clientName = opts.clientName ?? "mcp";
+    const config = loadConfig();
+    const check = checkSend(config, this.store, chatJid);
+    if (!check.allowed) return { sent: false, dryRun: check.dryRun, messageId: null, reason: check.reason };
+
+    let media;
+    try {
+      media = prepareMedia(filePath, config.maxMediaBytes);
+    } catch (err) {
+      return logError(
+        this.store,
+        { operation: "send_file", chatJid, error: err, context: { filePath }, client: clientName },
+        `No pude preparar ese archivo (${err instanceof Error ? err.message : String(err)}). Revisa la ruta o el tamaño; si no es esencial, continúa sin él.`
+      );
+    }
+
+    const label = `[${media.kind}: ${media.fileName}]${opts.caption ? ` ${opts.caption}` : ""}`;
+    if (check.dryRun) {
+      this.store.logSent({ chatJid, text: label, clientName, dryRun: true });
+      return { sent: false, dryRun: true, messageId: null, reason: "dryRun activo — archivo registrado pero NO enviado", kind: media.kind, fileName: media.fileName };
+    }
+
+    try {
+      const content = toMessageContent(media, { caption: opts.caption, asVoiceNote: opts.asVoiceNote });
+      const { id } = await this.connection.sendMedia(chatJid, content);
+      this.store.logSent({ chatJid, text: label, clientName, dryRun: false });
+      return { sent: true, dryRun: false, messageId: id, kind: media.kind, fileName: media.fileName };
+    } catch (err) {
+      return logError(
+        this.store,
+        { operation: "send_file", chatJid, error: err, context: { filePath, kind: media.kind }, client: clientName },
+        "No pude enviar el archivo. Si el contenido importa, descríbelo por texto o pide reenviarlo más tarde."
+      );
+    }
   }
 
   // ── stickers ─────────────────────────────────────────────

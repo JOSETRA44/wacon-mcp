@@ -815,6 +815,23 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
   );
 
   server.registerTool(
+    "send_file",
+    {
+      title: "Send a file (image, audio, video, PDF, any document)",
+      description:
+        "Send a local file to a chat. The kind is inferred from the extension: images and videos preview inline, audio can be sent as a real voice note (set as_voice_note), and anything else (PDF, Word, Excel, zip, txt…) goes as a document card keeping its filename. Use it to share a report, a photo, a recording, or homework. Same guardrails as send_message (rate limit, dry-run, allowlist) and it degrades with guidance on failure — if it can't send, say so rather than pretending. The file must already exist on this machine; give an absolute path.",
+      inputSchema: {
+        chat: z.string().describe("Chat JID or phone number"),
+        path: z.string().describe("Absolute path to the file on this machine"),
+        caption: z.string().max(1024).optional().describe("Text shown with the image/video/document"),
+        as_voice_note: z.boolean().default(false).describe("For audio: send as a voice note (waveform) instead of an audio file"),
+      },
+    },
+    async ({ chat, path, caption, as_voice_note }) =>
+      json(await api.sendFile(chat, path, { caption, asVoiceNote: as_voice_note, clientName: clientLabel }))
+  );
+
+  server.registerTool(
     "sync_stickers",
     {
       title: "Rebuild the sticker catalog",

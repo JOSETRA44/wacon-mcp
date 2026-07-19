@@ -125,6 +125,18 @@ Si `read_messages` muestra `[imagen] usa view_image(message_id)` o
   que decía el audio o mostraba la imagen, y jamás respondas el error al chat.
   Si no puedes procesar el medio, es mejor no comentar ese elemento.
 
+## Enviar archivos
+
+`send_file(chat, path, caption?, as_voice_note?)` manda cualquier archivo local:
+imágenes y videos con vista previa, audio (o **nota de voz** con
+`as_voice_note`), y PDFs/Word/Excel/zip como documento con su nombre. El tipo se
+deduce de la extensión, así que no tienes que decidirlo.
+
+Necesita una **ruta absoluta** en esta máquina. Si el usuario te pide "mándale el
+informe", localiza el archivo primero y confirma cuál es antes de enviarlo — un
+archivo equivocado es difícil de retirar. Si falla, recibes una directriz: sigue
+en texto en vez de inventar que se envió.
+
 ## Stickers (cuándo y cuál)
 
 El usuario manda stickers con algunos contactos y con otros no. **Replica su

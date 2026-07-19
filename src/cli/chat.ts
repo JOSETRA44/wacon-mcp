@@ -1,6 +1,28 @@
 import * as readline from "node:readline";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import type { DaemonClient } from "../daemon/client.js";
+import { WACON_HOME } from "../core/paths.js";
 import { c } from "./output.js";
+
+const LAST_CHAT_FILE = join(WACON_HOME, "last-chat.json");
+
+/** Remember where you were, so reopening the client doesn't start from zero. */
+function rememberChat(target: ChatTarget): void {
+  try {
+    writeFileSync(LAST_CHAT_FILE, JSON.stringify(target));
+  } catch {
+    // not worth bothering the user about
+  }
+}
+
+function recallChat(): ChatTarget | null {
+  try {
+    return JSON.parse(readFileSync(LAST_CHAT_FILE, "utf8")) as ChatTarget;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * `wacon chat` — WhatsApp in the terminal, for HUMANS.
@@ -48,16 +70,21 @@ async function pickChat(client: DaemonClient, rl: readline.Interface): Promise<C
     line(c.dim("No hay conversaciones pendientes. Usa: wacon chat <contacto>"));
     return null;
   }
+  const last = recallChat();
   line(c.bold("\nConversaciones pendientes:\n"));
   inbox.forEach((r, i) => {
     const age = r.waitingHours < 24 ? `${Math.round(r.waitingHours)}h` : `${Math.round(r.waitingHours / 24)}d`;
     line(` ${c.yellow(String(i + 1).padStart(2))}  ${c.bold((r.name ?? r.chat).slice(0, 28).padEnd(28))} ${c.dim(age.padStart(4))}  ${c.dim((r.lastMessage ?? "").slice(0, 40))}`);
   });
+  if (last) line(`\n  ${c.cyan("enter")}  ${c.dim(`continuar con ${last.name}`)}`);
   line();
 
-  const answer = await new Promise<string>((resolve) => rl.question(c.dim("número (o enter para salir) > "), resolve));
-  const idx = Number(answer.trim()) - 1;
-  const chosen = inbox[idx];
+  const prompt = last ? c.dim("número (enter = continuar, q = salir) > ") : c.dim("número (o enter para salir) > ");
+  const answer = (await new Promise<string>((resolve) => rl.question(prompt, resolve))).trim();
+  if (answer.toLowerCase() === "q") return null;
+  // Empty answer resumes where you left off — the common case after a quick exit.
+  if (answer === "" ) return last;
+  const chosen = inbox[Number(answer) - 1];
   if (!chosen) return null;
   return { jid: chosen.chat, name: chosen.name ?? chosen.chat };
 }
@@ -84,21 +111,64 @@ async function loadHistory(client: DaemonClient, target: ChatTarget, limit = 25)
   line();
 }
 
+/**
+ * Chats that pinged you while you were elsewhere, numbered so you can jump with
+ * a single `/2`. Keeps the most recent few — enough to act on, not a menu.
+ */
+const jumpSlots: ChatTarget[] = [];
+
+function rememberElsewhere(name: string, jid: string): number {
+  const existing = jumpSlots.findIndex((s) => s.jid === jid);
+  if (existing >= 0) return existing + 1;
+  jumpSlots.push({ jid, name });
+  if (jumpSlots.length > 9) jumpSlots.shift();
+  return jumpSlots.findIndex((s) => s.jid === jid) + 1;
+}
+
 const HELP = `
 ${c.bold("Comandos")}
+  /1 … /9           saltar a un chat que te escribió (aparece el número al avisarte)
   /chats            elegir otra conversación
   /switch <texto>   cambiar a un contacto por nombre/número
+  /send <archivo>   enviar imagen, audio, PDF… (--voz para nota de voz)
   /read [n]         cargar más historial (por defecto 25)
   /search <texto>   buscar en esta conversación
   /sticker <mood>   enviar un sticker (risa, carino, saludo, ok, disculpa...)
   /who              miembros (si es un grupo)
   /help             esta ayuda
   /quit             salir
+
+${c.dim("Tab autocompleta comandos y nombres de contactos.")}
 `;
 
 /** Run the interactive session. Resolves when the user quits. */
 export async function runChat(client: DaemonClient, initialQuery?: string): Promise<void> {
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout, prompt: "> " });
+  const COMMANDS = ["/chats", "/switch ", "/send ", "/read ", "/search ", "/sticker ", "/who", "/help", "/quit"];
+  // Names of recent chats, so Tab can complete "/switch nay" → "/switch Nayda…".
+  let completions: string[] = [];
+  client
+    .inbox(25, true)
+    .then((rows) => {
+      completions = (rows as { name: string | null }[]).map((r) => r.name ?? "").filter(Boolean);
+    })
+    .catch(() => undefined);
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    prompt: "> ",
+    completer: (line: string): [string[], string] => {
+      if (!line.startsWith("/")) return [[], line];
+      const switchMatch = line.match(/^\/switch\s+(.*)$/i);
+      if (switchMatch) {
+        const partial = switchMatch[1]!.toLowerCase();
+        const hits = completions.filter((n) => n.toLowerCase().includes(partial)).map((n) => `/switch ${n}`);
+        return [hits.length > 0 ? hits : [], line];
+      }
+      const hits = COMMANDS.filter((cmd) => cmd.startsWith(line));
+      return [hits.length > 0 ? hits : COMMANDS, line];
+    },
+  });
 
   let target: ChatTarget | null = initialQuery ? await resolveTarget(client, initialQuery) : await pickChat(client, rl);
   if (!target) {
@@ -112,6 +182,7 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
   let running = true;
   let typingSince = 0;
 
+  rememberChat(target);
   await showHeader(client, target);
   await loadHistory(client, target);
   await client.markRead(target.jid).catch(() => undefined); // honours the account's receipt setting
@@ -124,13 +195,23 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
         cursor = r.cursor;
         for (const e of r.events) {
           if (!running) break;
-          if (e.chat !== target!.jid) continue; // other chats stay quiet
-          printAbovePrompt(rl, renderMessage(
-            { from_me: 0, text: e.text, timestamp: new Date(e.at).getTime(), message_type: e.type },
-            "yo",
-            target!.name.split(" ")[0] ?? "él/ella"
-          ));
-          await client.markRead(target!.jid, 5).catch(() => undefined);
+          if (e.chat === target!.jid) {
+            printAbovePrompt(rl, renderMessage(
+              { from_me: 0, text: e.text, timestamp: new Date(e.at).getTime(), message_type: e.type },
+              "yo",
+              target!.name.split(" ")[0] ?? "él/ella"
+            ));
+            await client.markRead(target!.jid, 5).catch(() => undefined);
+          } else {
+            // Someone else wrote you. Silently dropping this was the worst bit
+            // of friction — you'd never know. Show it and offer a one-key jump.
+            const label = e.chatName ?? e.chat;
+            const slot = rememberElsewhere(label, e.chat);
+            printAbovePrompt(
+              rl,
+              `${c.magenta("💬")} ${c.bold(label)}: ${c.dim((e.text ?? "(media)").slice(0, 50))} ${c.dim(`· /${slot} para ir`)}`
+            );
+          }
         }
       } catch {
         if (running) await new Promise((r) => setTimeout(r, 2000)); // daemon hiccup: back off
@@ -166,6 +247,22 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
         if (text.startsWith("/")) {
           const [cmd, ...rest] = text.slice(1).split(/\s+/);
           const arg = rest.join(" ");
+
+          // /1../9 — jump to a chat that pinged you, without typing its name.
+          if (/^[1-9]$/.test(cmd ?? "")) {
+            const slot = jumpSlots[Number(cmd) - 1];
+            if (!slot) line(c.dim("ese número no corresponde a ningún aviso todavía"));
+            else {
+              target = slot;
+              rememberChat(target);
+              await showHeader(client, target);
+              await loadHistory(client, target);
+              await client.markRead(target.jid).catch(() => undefined);
+            }
+            rl.prompt();
+            return;
+          }
+
           switch (cmd) {
             case "quit":
             case "exit":
@@ -191,6 +288,7 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
               if (!next) line(c.yellow(`No encontré "${arg}".`));
               else {
                 target = next;
+                rememberChat(target);
                 await showHeader(client, target);
                 await loadHistory(client, target);
                 await client.markRead(target.jid).catch(() => undefined);
@@ -218,8 +316,26 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
               if (!sticker) line(c.yellow(`Sin stickers para "${arg}". Prueba: risa, carino, saludo, ok, disculpa`));
               else {
                 const r = await client.sendSticker(target!.jid, sticker.id, "cli");
-                line("ok" in r && r.ok === false ? c.yellow(`✖ ${r.guidance}`) : c.dim(` ${time(Date.now())}  ${c.green("yo")}  [sticker ${sticker.id}]`));
+                line("guidance" in r ? c.yellow(`✖ ${r.guidance}`) : c.dim(` ${time(Date.now())}  ${c.green("yo")}  [sticker ${sticker.id}]`));
               }
+              break;
+            }
+            case "send": {
+              if (!arg) {
+                line(c.dim("uso: /send <ruta del archivo> [--voz] [texto opcional]"));
+                break;
+              }
+              // Allow: /send C:\ruta\foto.jpg mira esto   |  /send audio.ogg --voz
+              const asVoiceNote = /(^|\s)--voz(\s|$)/.test(arg);
+              const cleaned = arg.replace(/(^|\s)--voz(\s|$)/, " ").trim();
+              const quoted = cleaned.match(/^"([^"]+)"\s*(.*)$/);
+              const filePath = quoted ? quoted[1]! : (cleaned.split(/\s+/)[0] ?? "");
+              const caption = quoted ? quoted[2] : cleaned.slice(filePath.length).trim();
+              line(c.dim(`enviando ${filePath}...`));
+              const r = await client.sendFile(target!.jid, filePath, { caption: caption || undefined, asVoiceNote, clientName: "cli" });
+              if ("guidance" in r) line(c.yellow(`✖ ${r.guidance}`));
+              else if (r.sent) printAbovePrompt(rl, ` ${c.dim(time(Date.now()))}  ${c.green("yo")}  ${c.dim(`[${r.kind}: ${r.fileName}]`)}${caption ? ` ${caption}` : ""}`);
+              else line(c.yellow(`✖ no enviado: ${r.reason ?? "bloqueado"}`));
               break;
             }
             case "who": {

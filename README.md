@@ -135,7 +135,19 @@ wacon chat            # elige entre tus conversaciones pendientes
 wacon chat nayda      # abre una directamente
 ```
 
-Cliente de chat en la terminal, sin abrir un navegador y **sin dependencias nuevas**. Los mensajes entrantes aparecen en vivo mientras escribes, manda "escribiendo…" como un cliente real, y el scroll y el copiar/pegar de tu terminal siguen funcionando. Dentro: `/chats`, `/switch`, `/search`, `/sticker <mood>`, `/who`, `/quit`.
+Cliente de chat en la terminal, sin abrir un navegador y **sin dependencias nuevas**. Los mensajes entrantes aparecen en vivo mientras escribes, manda "escribiendo…" como un cliente real, y el scroll y el copiar/pegar de tu terminal siguen funcionando.
+
+Pensado para que no estorbe: si **otro contacto te escribe** te avisa en línea con un número para saltar (`/2`), **Tab** autocompleta comandos y nombres, y al reabrir puedes **continuar donde lo dejaste** con enter. Dentro: `/send <archivo>`, `/chats`, `/switch`, `/search`, `/sticker <mood>`, `/who`, `/quit`.
+
+## Enviar archivos
+
+```bash
+# dentro del chat
+/send C:\ruta\informe.pdf mira esto
+/send nota.ogg --voz          # nota de voz real
+```
+
+Un solo camino detecta el tipo por la extensión: **imágenes y videos** con vista previa, **audio** (o nota de voz con waveform), y **cualquier otra cosa** —PDF, Word, Excel, zip— como documento conservando su nombre. Los agentes tienen la tool MCP `send_file`, así que pueden mandar un informe o una foto igual que tú. Mismos guardrails y degradación honesta si falla.
 
 **Tics azules:** Wacon respeta la privacidad de tu cuenta automáticamente — si tienes las confirmaciones de lectura desactivadas, marcar como leído no notifica al otro. La cabecera te lo muestra (`vistos: on/off`).
 
@@ -182,7 +194,7 @@ wacon stickers -c nayda      # afinidad y moods con ese contacto
 **Memoria**: `get_contact_profile`, `update_contact_profile`, `analyze_contact`, `get_persona`, `list_episodes`, `read_episode`, `summarize_episode`, `wacon_init`
 **Inteligencia**: `prepare_reply`, `remember_fact`, `forget_fact`, `get_contact_facts`, `tag_chat`, `untag_chat`, `list_special_chats`, `consult_playbook`, `wacon_doctor`
 **Análisis**: `run_bulk_analysis`, `analysis_status`, `get_analysis_bundle`, `list_suggested_events`, `confirm_suggested_event`, `dismiss_suggested_event`, `resolve_contact`, `list_analysis_targets`
-**Stickers**: `list_stickers`, `send_sticker`, `sync_stickers`
+**Stickers y archivos**: `list_stickers`, `send_sticker`, `sync_stickers`, `send_file`
 **Multimedia**: `view_image`, `transcribe_audio`, `get_error_log`
 **Tiempo/agenda**: `schedule_event`, `list_events`, `cancel_event`, `complete_event`, `add_task`, `list_tasks`, `complete_task`, `get_agenda`, `wait_for_triggers`
 **Envío**: `send_message` (con `typing_ms` para simular "escribiendo…")

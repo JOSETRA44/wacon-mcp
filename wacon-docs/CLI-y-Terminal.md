@@ -57,6 +57,34 @@ Cliente de chat clásico, **sin dependencias nuevas** (`readline` + ANSI mínimo
 
 Es **solo para humanos** a propósito: una TUI interactiva necesita pty y bloquea, así que un agente no puede pilotarla. `wacon chat --json` lo rechaza con un error parseable en vez de colgarse.
 
+## Enviar archivos
+
+Un solo camino para todo: `send_file` detecta el tipo por la extensión y lo manda como WhatsApp espera.
+
+| Extensión | Cómo llega |
+|---|---|
+| `.jpg .png .webp .gif` | Imagen con vista previa (+ caption) |
+| `.mp4 .mov .mkv` | Video con vista previa |
+| `.ogg .mp3 .m4a .wav` | Audio — o **nota de voz** real con `as_voice_note` |
+| `.pdf .docx .xlsx .zip`… | Documento con su nombre de archivo |
+| cualquier otra | Documento (nada queda sin poder enviarse) |
+
+Desde el chat: `/send C:\ruta\informe.pdf mira esto` · `/send nota.ogg --voz`
+Para agentes: la tool MCP `send_file` (rutas absolutas).
+
+Mismos guardrails que el texto (rate limit, `dryRun`, allowlist) y degradación con directriz si falla — verificado: archivo inexistente devuelve guía natural, nunca una excepción.
+
+## Menos fricción en el chat
+
+Cuatro problemas concretos que tenía y cómo se arreglaron:
+
+| Fricción | Solución |
+|---|---|
+| Si otro te escribía mientras estabas en un chat, **no te enterabas** (se descartaba en silencio) | Aviso en línea: `💬 Brandon: hola · /2 para ir` |
+| Cambiar de chat exigía comandos exactos | **`/1`…`/9`** salta al chat que te avisó; `/switch` acepta nombres parciales |
+| Al salir perdías dónde estabas | Se recuerda el último chat: **enter** en el selector lo retoma |
+| No había autocompletado | **Tab** completa comandos y nombres de contactos |
+
 ## Tics azules: se resuelven solos
 
 No se inventó ningún ajuste. Baileys ya consulta la privacidad de la cuenta (`Socket/messages-send.js`):

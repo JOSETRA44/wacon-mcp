@@ -105,6 +105,7 @@ export interface WaconApi {
   syncStickers(): Promise<{ packImported: number; ownIndexed: number; habits: number }>;
   listStickers(opts?: { mood?: string; chat?: string; limit?: number }): Promise<unknown>;
   sendSticker(chat: string, stickerId: string, clientName: string): Promise<SendResult | Guided>;
+  sendFile(chat: string, filePath: string, opts?: { caption?: string; asVoiceNote?: boolean; clientName?: string }): Promise<(SendResult & { kind?: string; fileName?: string }) | Guided>;
   logout(): Promise<void>;
 }
 
@@ -175,6 +176,7 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
     syncStickers: async () => service.syncStickers(),
     listStickers: async (opts) => service.listStickers(opts),
     sendSticker: (chat, stickerId, clientName) => service.sendSticker(chat, stickerId, clientName),
+    sendFile: (chat, filePath, opts) => service.sendFile(chat, filePath, opts),
     logout: () => service.logout(),
   };
 }

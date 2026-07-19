@@ -218,6 +218,9 @@ export class DaemonClient implements WaconApi {
   sendSticker(chat: string, stickerId: string, clientName: string): ReturnType<WaconApi["sendSticker"]> {
     return this.rpc("sendSticker", [chat, stickerId, clientName], 120_000);
   }
+  sendFile(chat: string, filePath: string, opts?: Parameters<WaconApi["sendFile"]>[2]): ReturnType<WaconApi["sendFile"]> {
+    return this.rpc("sendFile", [chat, filePath, opts], 180_000);
+  }
   async logout(): Promise<void> {
     await this.rpc("logout");
   }
