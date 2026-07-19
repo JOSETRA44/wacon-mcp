@@ -34,6 +34,7 @@
     "dist",
     "assets",
     "skills",
+    "scripts/postinstall.mjs",
     "README.md",
     "LICENSE"
   ],
@@ -43,6 +44,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prepare": "tsup",
+    "postinstall": "node scripts/postinstall.mjs",
     "prepublishOnly": "npm run typecheck && npm test"
   },
   "dependencies": {

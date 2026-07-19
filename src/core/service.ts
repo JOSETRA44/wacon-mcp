@@ -15,6 +15,7 @@ import { runDoctor, type DoctorReport } from "./doctor.js";
 import { ProactiveScheduler } from "./scheduler.js";
 import { AnalysisRunner, type AnalysisScope, type AnalysisJob } from "../analysis/runner.js";
 import { extractFacts, extractActionables } from "../analysis/extractors.js";
+import { pendingReplies, openCommitments } from "../analysis/productivity.js";
 import { logError, GUIDANCE, type Guided } from "./errors.js";
 import { fetchMedia } from "../media/media.js";
 import { transcribe } from "../media/transcription.js";
@@ -349,6 +350,10 @@ export class WaconService {
     return { presence };
   }
 
+  readReceiptsMode(): Promise<"on" | "off" | "unknown"> {
+    return this.connection.readReceiptsMode();
+  }
+
   async markRead(chatJidOrPhone: string, limit = 20): Promise<{ marked: number }> {
     const chatJid = this.resolveChatJid(chatJidOrPhone);
     const unread = this.store
@@ -650,6 +655,85 @@ export class WaconService {
       base64: media.base64,
       mimetype: media.mimetype ?? "audio/ogg",
       note: "Si tu agente puede procesar audio, escúchalo directamente. Si no, configura un backend de transcripción (wacon doctor).",
+    };
+  }
+
+  // ── productivity ─────────────────────────────────────────
+
+  /** What still needs the user's reply, ranked. */
+  inbox(limit = 40, includeGroups = false) {
+    return pendingReplies(this.store, { limit, includeGroups });
+  }
+
+  /** Promises the user made and may not have kept. */
+  commitments(sinceDays = 21) {
+    return openCommitments(this.store, sinceDays);
+  }
+
+  /** One call to start the day: what's pending, what's due, what arrived. */
+  briefing(sinceMinutes = 720) {
+    const pending = pendingReplies(this.store, { limit: 12, includeGroups: false });
+    const digest = this.digest(sinceMinutes, 12);
+    const agenda = this.getAgenda(7);
+    return {
+      now: this.now(),
+      pendingReplies: pending,
+      openCommitments: openCommitments(this.store, 21).slice(0, 5),
+      newSince: { since: digest.since, totalIncoming: digest.totalIncoming, chats: digest.chats.slice(0, 8) },
+      upcomingEvents: agenda.events.slice(0, 8),
+      openTasks: agenda.tasks.slice(0, 8),
+    };
+  }
+
+  // ── group member profiling (mass ingestion) ──────────────
+
+  /**
+   * Turn a group's history into per-PERSON memory. Each participant has a
+   * stable id, so their messages can be profiled independently: how they write
+   * plus candidate facts about them. One group of thousands of messages becomes
+   * many usable contact profiles.
+   */
+  analyzeGroupMembers(groupJidOrName: string, minMessages = 20): {
+    group: string;
+    groupName: string | null;
+    members: { jid: string; name: string | null; messages: number; styleSummary: string | null; factsFound: number }[];
+  } {
+    const group = this.resolveChatJid(groupJidOrName);
+    const members = this.store.groupMembers(group, minMessages);
+    const out: { jid: string; name: string | null; messages: number; styleSummary: string | null; factsFound: number }[] = [];
+
+    for (const m of members) {
+      const msgs = this.store.memberMessages(group, m.sender_jid);
+      const authored = msgs.filter((x) => isAuthoredText(x.text));
+      if (authored.length < minMessages) continue;
+
+      // Their writing style (these are THEIR messages, so from_me is irrelevant here).
+      const stats = analyzeStyle(authored);
+      writeProfileStats(m.sender_jid, m.display_name ?? this.store.resolveDisplayName(m.sender_jid), stats);
+
+      // Candidate facts they revealed about themselves.
+      let factsFound = 0;
+      for (const f of extractFacts(authored)) {
+        this.store.upsertFact({ jid: m.sender_jid, category: f.category, fact: f.fact, confidence: f.confidence, sourceMsgId: f.sourceMsgId });
+        factsFound++;
+      }
+      out.push({ jid: m.sender_jid, name: m.display_name, messages: authored.length, styleSummary: describeStyle(stats), factsFound });
+    }
+    return { group, groupName: this.store.resolveDisplayName(group), members: out };
+  }
+
+  /** Who's in a group and how much they participate (cheap overview). */
+  groupMembers(groupJidOrName: string, minMessages = 5) {
+    const group = this.resolveChatJid(groupJidOrName);
+    return {
+      group,
+      groupName: this.store.resolveDisplayName(group),
+      members: this.store.groupMembers(group, minMessages).map((m) => ({
+        jid: m.sender_jid,
+        name: m.display_name ?? this.store.resolveDisplayName(m.sender_jid),
+        messages: m.total,
+        hasProfile: readProfile(m.sender_jid) !== null,
+      })),
     };
   }
 

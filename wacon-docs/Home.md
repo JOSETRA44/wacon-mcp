@@ -21,6 +21,8 @@ Wacon es un CLI + servidor MCP que conecta WhatsApp con agentes de IA, con **mem
 - [[Multimedia-y-Proactividad]] — vista/oído, anti-fraude, calendario proactivo
 - [[Analisis-Automatizado]] — motor de dos niveles: fuerza bruta + pulido opcional del agente
 - [[Stickers]] — librería propia + pack de gatitos, mood por contexto, afinidad
+- [[CLI-y-Terminal]] — `wacon chat` (WhatsApp en terminal) y la CLI a prueba de agentes
+- [[Productividad]] — bandeja de pendientes, compromisos, briefing y perfilado de miembros de grupo
 - [[Calidad-de-Datos]] — qué cuenta como "tu voz"; la persona contaminada y su arreglo
 - [[Herramientas-MCP]] — los 57 tools + resources + prompt
 - [[Guardrails-y-Seguridad]]

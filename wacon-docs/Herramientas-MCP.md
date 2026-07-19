@@ -42,6 +42,14 @@ tags: [wacon, mcp, tools]
 | `set_presence` | `unavailable` = sigilo (default); `available` = aparecer en línea |
 | `mark_read` | Tics azules explícitos — leer nunca los envía solo |
 
+## Productividad — [[Productividad]]
+| Tool | Nota |
+|---|---|
+| `get_inbox` | ⭐ Qué te falta responder, priorizado (canales excluidos) |
+| `get_commitments` | Promesas tuyas sin cumplir |
+| `get_briefing` | Ponte al día: pendientes + agenda + novedades |
+| `list_group_members` / `analyze_group_members` | Perfil por persona dentro de un grupo |
+
 ## Multimedia y proactividad — [[Multimedia-y-Proactividad]]
 | Tool | Nota |
 |---|---|

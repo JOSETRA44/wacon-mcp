@@ -128,6 +128,39 @@ wacon init --courses    # solo grupos de cursos de la universidad
 wacon suggested         # accionables detectados; --confirm <id> para agendar
 ```
 
+## WhatsApp en la terminal
+
+```bash
+wacon chat            # elige entre tus conversaciones pendientes
+wacon chat nayda      # abre una directamente
+```
+
+Cliente de chat en la terminal, sin abrir un navegador y **sin dependencias nuevas**. Los mensajes entrantes aparecen en vivo mientras escribes, manda "escribiendo…" como un cliente real, y el scroll y el copiar/pegar de tu terminal siguen funcionando. Dentro: `/chats`, `/switch`, `/search`, `/sticker <mood>`, `/who`, `/quit`.
+
+**Tics azules:** Wacon respeta la privacidad de tu cuenta automáticamente — si tienes las confirmaciones de lectura desactivadas, marcar como leído no notifica al otro. La cabecera te lo muestra (`vistos: on/off`).
+
+## Para agentes: salida limpia con `--json`
+
+Todos los comandos de datos aceptan `--json`: imprimen el objeto tal cual, **sin un solo código ANSI**, para que no ensucien el contexto de un agente. También se respeta `NO_COLOR`, `--no-color` y la salida redirigida.
+
+```bash
+wacon inbox --json | jq '.[0].name'
+```
+
+`wacon chat` es lo único reservado a humanos (es interactivo); si un agente lo intenta con `--json`, recibe un error parseable en vez de colgarse.
+
+## Productividad: ponte al día
+
+Wacon no es solo para contestar — sirve para **organizarte**:
+
+- **`wacon inbox`** — qué te falta responder, priorizado: chats donde la otra persona habló último, ordenados por si te preguntaron algo, cuántos mensajes se acumularon y qué tan reciente es. Los **canales de WhatsApp se excluyen** (no puedes responderles; inundaban la lista con cientos de "sin responder").
+- **`wacon commitments`** — promesas que hiciste ("te aviso", "mañana te mando") y nunca seguiste. Conservador a propósito: prefiere no decir nada antes que acusarte en falso.
+- **`wacon brief`** — el "ponme al día" completo: pendientes, compromisos, qué llegó, agenda y tareas.
+
+## Perfilado de miembros de grupo
+
+Un grupo son decenas de personas y miles de mensajes. Como cada participante tiene un identificador estable, `wacon members <grupo> --analyze` construye **un perfil de estilo por persona** más los hechos que revelaron — ingesta masiva sin gastar tokens. Cuando esa persona te escriba en privado, ya hay contexto.
+
 ## Stickers
 
 Donde tú pondrías un sticker, el agente ahora **elige uno y lo manda**:
@@ -163,7 +196,14 @@ Dos skills, una por trabajo:
 - **`wacon-whatsapp`** — conversar: leer, responder en tu voz, stickers, proactividad.
 - **`wacon-knowledge`** — analizar: construir y mantener la base de conocimiento (análisis masivo, bundles, hechos, episodios, persona).
 
-Instalación: `npx skills add JOSETRA44/wacon-mcp` o copia las carpetas a `~/.claude/skills/`. Viajan dentro del paquete npm (`node_modules/wacon/skills/`).
+**Se instalan solas** al hacer `npm install` (un postinstall las copia a `~/.claude/skills/`, sin sobrescribir las que ya tengas y sin romper nunca la instalación). Para hacerlo a mano o actualizarlas, un solo comando las cubre todas:
+
+```bash
+wacon skills            # instala todas las skills incluidas
+wacon skills --force    # sobrescribe para actualizar
+```
+
+También `npx skills add JOSETRA44/wacon-mcp`. Viajan dentro del paquete npm (`node_modules/wacon/skills/`).
 
 ## Calidad de datos
 
@@ -198,7 +238,9 @@ wacon watch [-m 30] [-p 40] [-g] | digest [-m 60] | window
 wacon init | profile <chat> [--note "..."] | persona
 wacon facts <chat> [--add "..." --category ...] | tag <chat> <tag> | untag | special
 wacon playbook <chat> "<situación>"
-wacon calendar [-d 30] | tasks | errors [--tail 20]
+wacon chat [contacto]        # WhatsApp interactivo en la terminal (humanos)
+wacon inbox | commitments | brief | members <grupo> [--analyze]
+wacon calendar [-d 30] | tasks | errors [--tail 20] | skills [--force]
 wacon daemon start|stop|log | config | mcp
 ```
 

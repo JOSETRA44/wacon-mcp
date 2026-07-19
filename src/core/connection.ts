@@ -303,11 +303,13 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
     if (!chatJid || !id || chatJid === "status@broadcast") return null;
     const { text, type, quotedId } = extractText(msg);
     const fromMe = msg.key.fromMe ? 1 : 0;
-    const senderJid = fromMe
-      ? this.selfJid
-      : chatJid.endsWith("@g.us")
-        ? (msg.key.participant ?? null)
-        : chatJid;
+    // In groups the author lives in the key, but which field carries it varies
+    // between live messages and history sync — check every known spot, since a
+    // missing sender means that person can never be profiled.
+    const key = msg.key as { participant?: string | null; participantAlt?: string | null };
+    const groupSender =
+      key.participant ?? key.participantAlt ?? (msg as { participant?: string | null }).participant ?? null;
+    const senderJid = fromMe ? this.selfJid : chatJid.endsWith("@g.us") ? groupSender : chatJid;
     // For media without a caption, store a placeholder as the text so the chat
     // reads coherently and the agent knows to inspect it (view_image/transcribe_audio).
     let displayText = text;
@@ -399,6 +401,24 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
     }
     const result = await socket.sendMessage(chatJid, { text });
     return { id: result?.key?.id ?? null };
+  }
+
+  /**
+   * Whether this account sends read receipts (blue ticks). Baileys already
+   * honours it when marking messages read — with receipts off it sends
+   * 'read-self', which marks locally without notifying the sender — so this is
+   * only for telling the user what to expect.
+   */
+  async readReceiptsMode(): Promise<"on" | "off" | "unknown"> {
+    try {
+      const settings = await this.requireSocket().fetchPrivacySettings();
+      const value = settings?.readreceipts;
+      if (value === "all") return "on";
+      if (value === "none") return "off";
+      return "unknown";
+    } catch {
+      return "unknown";
+    }
   }
 
   /** Send a sticker (webp buffer) — WhatsApp renders it as a real sticker. */

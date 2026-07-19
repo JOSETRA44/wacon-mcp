@@ -719,6 +719,70 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
     async ({ limit, chat }) => json(await api.errorLog(limit, chat))
   );
 
+  // ── productivity (getting on top of messages) ────────────
+
+  server.registerTool(
+    "get_inbox",
+    {
+      title: "What still needs the user's reply",
+      description:
+        "⭐ The productivity core: chats where the LAST message came from the other person, so the ball is in the user's court — ranked by priority (direct chats, questions asked, messages piling up, recency). Use this for 'qué me falta responder', 'ponme al día', 'ayúdame con mis mensajes', or to triage a backlog. Far better than list_chats for figuring out where to spend attention.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(100).default(20),
+        include_groups: z.boolean().default(false).describe("Groups are noisy; off by default"),
+      },
+    },
+    async ({ limit, include_groups }) => json(await api.inbox(limit, include_groups))
+  );
+
+  server.registerTool(
+    "get_commitments",
+    {
+      title: "Promises the user made and may not have kept",
+      description:
+        "Finds messages where the user promised something ('te aviso', 'mañana te mando', 'yo te confirmo') and never wrote again in that chat afterwards — likely dropped balls. Great for 'qué quedé en hacer', 'a quién le quedé mal', or a weekly review. Verify before acting: a promise may have been fulfilled by phone or in person.",
+      inputSchema: { since_days: z.number().int().min(1).max(120).default(21) },
+    },
+    async ({ since_days }) => json(await api.commitments(since_days))
+  );
+
+  server.registerTool(
+    "get_briefing",
+    {
+      title: "Start-of-day briefing",
+      description:
+        "One call that answers 'ponme al día': current time, what needs replies (ranked), open commitments, what arrived recently per chat, upcoming calendar events and open tasks. Use this to open a session, for a morning check-in, or when the user asks how things stand.",
+      inputSchema: { since_minutes: z.number().int().min(30).max(10080).default(720).describe("Window for 'what arrived' (default 12h)") },
+    },
+    async ({ since_minutes }) => json(await api.briefing(since_minutes))
+  );
+
+  // ── group member profiling ───────────────────────────────
+
+  server.registerTool(
+    "list_group_members",
+    {
+      title: "Who's in a group and how much they talk",
+      description: "List a group's participants with their message counts and whether they already have a style profile. Each participant has a stable id, so they can be profiled individually. Cheap overview — use before analyze_group_members.",
+      inputSchema: { group: z.string().describe("Group JID or name"), min_messages: z.number().int().min(1).default(5) },
+    },
+    async ({ group, min_messages }) => json(await api.groupMembers(group, min_messages))
+  );
+
+  server.registerTool(
+    "analyze_group_members",
+    {
+      title: "Build a profile for each person in a group",
+      description:
+        "Mass ingestion: analyzes each participant's messages separately (they each have a stable id) and builds a per-PERSON style profile plus candidate facts they revealed about themselves. Turns one big group into many usable contact memories — so when that person writes privately, or you need to address them in the group, there's already context. Deterministic and free. Run it on groups that matter (family, course, work); skip sales/game groups.",
+      inputSchema: {
+        group: z.string().describe("Group JID or name"),
+        min_messages: z.number().int().min(5).default(20).describe("Skip members who barely talk"),
+      },
+    },
+    async ({ group, min_messages }) => json(await api.analyzeGroupMembers(group, min_messages))
+  );
+
   // ── stickers ─────────────────────────────────────────────
 
   server.registerTool(

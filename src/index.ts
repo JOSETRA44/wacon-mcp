@@ -1,12 +1,14 @@
 import { Command } from "commander";
 import qrcodeTerminal from "qrcode-terminal";
-import pc from "picocolors";
+import { configureOutput, emit, fail, isJsonMode, c as pc } from "./cli/output.js";
 import { DaemonClient } from "./daemon/client.js";
 import { readDaemonInfo, clearDaemonInfo, pingDaemon } from "./daemon/lifecycle.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { PROFILE_SECTIONS, profilePath, type ProfileSection } from "./memory/profiles.js";
 import { WACON_HOME, PERSONA_PATH, CONFIG_PATH, DAEMON_LOG_PATH, NOTEBOOKS_PATH } from "./core/paths.js";
 import { FACT_CATEGORIES } from "./memory/facts.js";
+import { installSkills, defaultSkillsTarget } from "./core/skills-install.js";
+import { runChat } from "./cli/chat.js";
 
 const program = new Command();
 const client = new DaemonClient();
@@ -17,15 +19,19 @@ function fmtTime(iso: string | null | number): string {
   return d.toLocaleString();
 }
 
-function die(err: unknown): never {
-  console.error(pc.red(`error: ${err instanceof Error ? err.message : String(err)}`));
-  process.exit(1);
-}
+const die = fail;
 
 program
   .name("wacon")
   .description("WhatsApp AI CLI + MCP server — manage WhatsApp from the terminal and let AI agents do it in your voice")
-  .version("0.1.0");
+  .version("0.1.0")
+  // Agent-facing flags: --json gives machine-readable output with zero ANSI.
+  .option("--json", "machine-readable output (for agents/scripts)", false)
+  .option("--no-color", "disable colour output")
+  .hook("preAction", (thisCommand) => {
+    const opts = thisCommand.opts<{ json?: boolean; color?: boolean }>();
+    configureOutput({ json: opts.json === true, noColor: opts.color === false });
+  });
 
 program
   .command("login")
@@ -62,6 +68,10 @@ program
   .action(async () => {
     try {
       const s = await client.status();
+      if (isJsonMode()) {
+        emit(s, () => undefined);
+        return;
+      }
       const stateColor = s.state === "connected" ? pc.green : s.state === "waiting_qr" ? pc.yellow : pc.red;
       console.log(`state:     ${stateColor(s.state)}`);
       console.log(`account:   ${s.selfJid ?? "—"}`);
@@ -101,13 +111,15 @@ program
         unread_count: number;
         last_message_ts: number | null;
       }[];
-      for (const c of chats) {
-        const name = c.display_name ?? pc.dim("(sin nombre)");
-        const badge = c.is_group ? pc.magenta("[grupo]") : "";
-        const unread = c.unread_count > 0 ? pc.yellow(` (${c.unread_count} sin leer)`) : "";
-        console.log(`${pc.bold(name)} ${badge}${unread}`);
-        console.log(pc.dim(`  ${c.jid} · ${c.last_message_ts ? fmtTime(c.last_message_ts) : "—"}`));
-      }
+      emit(chats, () => {
+        for (const chat of chats) {
+          const name = chat.display_name ?? pc.dim("(sin nombre)");
+          const badge = chat.is_group ? pc.magenta("[grupo]") : "";
+          const unread = chat.unread_count > 0 ? pc.yellow(` (${chat.unread_count} sin leer)`) : "";
+          console.log(`${pc.bold(name)} ${badge}${unread}`);
+          console.log(pc.dim(`  ${chat.jid} · ${chat.last_message_ts ? fmtTime(chat.last_message_ts) : "—"}`));
+        }
+      });
     } catch (err) {
       die(err);
     }
@@ -120,10 +132,12 @@ program
   .action(async (chat: string, opts: { limit: string }) => {
     try {
       const msgs = await client.readMessages(chat, Number(opts.limit));
-      for (const m of msgs.slice().reverse()) {
-        const who = m.from_me ? pc.green("yo") : pc.cyan(m.sender_jid?.split("@")[0] ?? "?");
-        console.log(`${pc.dim(fmtTime(m.timestamp))} ${who}: ${m.text ?? pc.dim(`(${m.message_type})`)}`);
-      }
+      emit(msgs.slice().reverse(), () => {
+        for (const m of msgs.slice().reverse()) {
+          const who = m.from_me ? pc.green("yo") : pc.cyan(m.sender_jid?.split("@")[0] ?? "?");
+          console.log(`${pc.dim(fmtTime(m.timestamp))} ${who}: ${m.text ?? pc.dim(`(${m.message_type})`)}`);
+        }
+      });
     } catch (err) {
       die(err);
     }
@@ -150,11 +164,13 @@ program
   .action(async (queryParts: string[], opts: { chat?: string; limit: string }) => {
     try {
       const rows = await client.searchMessages(queryParts.join(" "), opts.chat, Number(opts.limit));
-      for (const m of rows) {
-        const who = m.from_me ? pc.green("yo") : pc.cyan(m.sender_jid?.split("@")[0] ?? "?");
-        console.log(`${pc.dim(fmtTime(m.timestamp))} ${pc.dim(m.chat_jid)} ${who}: ${m.snippet}`);
-      }
-      if (rows.length === 0) console.log(pc.dim("no matches"));
+      emit(rows, () => {
+        for (const m of rows) {
+          const who = m.from_me ? pc.green("yo") : pc.cyan(m.sender_jid?.split("@")[0] ?? "?");
+          console.log(`${pc.dim(fmtTime(m.timestamp))} ${pc.dim(m.chat_jid)} ${who}: ${m.snippet}`);
+        }
+        if (rows.length === 0) console.log(pc.dim("no matches"));
+      });
     } catch (err) {
       die(err);
     }
@@ -166,14 +182,16 @@ program
   .action(async (query: string) => {
     try {
       const hits = await client.resolveContact(query);
-      if (hits.length === 0) {
-        console.log(pc.dim("sin coincidencias con mensajes"));
-        return;
-      }
-      for (const h of hits) {
-        console.log(`${pc.bold(h.displayName ?? "(sin nombre)")} ${pc.cyan(h.jid)}`);
-        console.log(pc.dim(`   ${h.total} msgs (${h.outgoing} tuyos) · vía ${h.via}`));
-      }
+      emit(hits, () => {
+        if (hits.length === 0) {
+          console.log(pc.dim("sin coincidencias con mensajes"));
+          return;
+        }
+        for (const h of hits) {
+          console.log(`${pc.bold(h.displayName ?? "(sin nombre)")} ${pc.cyan(h.jid)}`);
+          console.log(pc.dim(`   ${h.total} msgs (${h.outgoing} tuyos) · vía ${h.via}`));
+        }
+      });
     } catch (err) {
       die(err);
     }
@@ -186,12 +204,14 @@ program
   .action(async (opts: { limit: string }) => {
     try {
       const rows = await client.analysisTargets(Number(opts.limit));
-      for (const r of rows) {
-        const tag = r.isGroup ? pc.magenta("[grupo]") : "";
-        const facts = r.hasFacts ? pc.green("✓hechos") : pc.dim("sin hechos");
-        console.log(`${pc.bold(r.displayName ?? "(sin nombre)")} ${tag} ${facts}`);
-        console.log(pc.dim(`   ${r.jid} · ${r.total} msgs (${r.outgoing} tuyos)`));
-      }
+      emit(rows, () => {
+        for (const r of rows) {
+          const tag = r.isGroup ? pc.magenta("[grupo]") : "";
+          const facts = r.hasFacts ? pc.green("✓hechos") : pc.dim("sin hechos");
+          console.log(`${pc.bold(r.displayName ?? "(sin nombre)")} ${tag} ${facts}`);
+          console.log(pc.dim(`   ${r.jid} · ${r.total} msgs (${r.outgoing} tuyos)`));
+        }
+      });
     } catch (err) {
       die(err);
     }
@@ -348,6 +368,157 @@ program
   });
 
 program
+  .command("chat [contacto]")
+  .description("WhatsApp interactivo en la terminal (para humanos, no para agentes)")
+  .action(async (contacto: string | undefined) => {
+    try {
+      if (isJsonMode()) die("`wacon chat` es interactivo; los agentes deben usar el MCP o los comandos con --json");
+      await runChat(client, contacto);
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("inbox")
+  .description("What still needs your reply, ranked by priority")
+  .option("-n, --limit <n>", "how many", "20")
+  .option("-g, --groups", "include groups", false)
+  .action(async (opts: { limit: string; groups: boolean }) => {
+    try {
+      const rows = (await client.inbox(Number(opts.limit), opts.groups)) as {
+        chat: string; name: string | null; isGroup: boolean; waitingHours: number; unansweredCount: number; lastMessage: string | null; priority: number; reasons: string[];
+      }[];
+      emit(rows, () => {
+        if (rows.length === 0) {
+          console.log(pc.green("✔ nada pendiente — estás al día"));
+          return;
+        }
+        for (const r of rows) {
+          const age = r.waitingHours < 24 ? `${Math.round(r.waitingHours)}h` : `${Math.round(r.waitingHours / 24)}d`;
+          const tag = r.priority >= 60 ? pc.red(`[${r.priority}]`) : r.priority >= 40 ? pc.yellow(`[${r.priority}]`) : pc.dim(`[${r.priority}]`);
+          console.log(`${tag} ${pc.bold(r.name ?? r.chat)} ${r.isGroup ? pc.magenta("[grupo]") : ""} ${pc.dim(`hace ${age}`)}`);
+          if (r.lastMessage) console.log(pc.dim(`     "${r.lastMessage.slice(0, 80)}"`));
+          console.log(pc.dim(`     ${r.reasons.join(" · ")}`));
+        }
+      });
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("commitments")
+  .description("Promises you made and may not have kept")
+  .option("-d, --days <n>", "look back", "21")
+  .action(async (opts: { days: string }) => {
+    try {
+      const rows = (await client.commitments(Number(opts.days))) as { chat: string; name: string | null; at: string; text: string; ageDays: number }[];
+      emit(rows, () => {
+        if (rows.length === 0) {
+          console.log(pc.green("✔ sin compromisos abiertos detectados"));
+          return;
+        }
+        for (const r of rows) {
+          console.log(`${pc.yellow(`hace ${r.ageDays}d`)} ${pc.bold(r.name ?? r.chat)}`);
+          console.log(pc.dim(`     "${r.text}"`));
+        }
+        console.log(pc.dim("\nverifica antes de actuar: puede que ya lo hayas cumplido por otro medio"));
+      });
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("brief")
+  .description("Start-of-day briefing: pendientes, compromisos, novedades y agenda")
+  .option("-m, --minutes <n>", "ventana de novedades", "720")
+  .action(async (opts: { minutes: string }) => {
+    try {
+      const b = (await client.briefing(Number(opts.minutes))) as {
+        now: { human: string };
+        pendingReplies: { name: string | null; chat: string; priority: number; waitingHours: number }[];
+        openCommitments: { name: string | null; text: string; ageDays: number }[];
+        newSince: { totalIncoming: number };
+        upcomingEvents: { title: string; start_ts: number }[];
+        openTasks: { title: string }[];
+      };
+      if (isJsonMode()) {
+        emit(b, () => undefined);
+        return;
+      }
+      console.log(pc.bold(`\n${b.now.human}\n`));
+      console.log(pc.cyan(`📥 Te faltan responder (${b.pendingReplies.length})`));
+      for (const p of b.pendingReplies.slice(0, 6)) {
+        const age = p.waitingHours < 24 ? `${Math.round(p.waitingHours)}h` : `${Math.round(p.waitingHours / 24)}d`;
+        console.log(`   ${pc.bold(p.name ?? p.chat)} ${pc.dim(`· hace ${age}`)}`);
+      }
+      if (b.openCommitments.length > 0) {
+        console.log(pc.cyan(`\n🤝 Quedaste en hacer`));
+        for (const c of b.openCommitments) console.log(`   ${pc.bold(c.name ?? "")}: ${pc.dim(c.text.slice(0, 60))} ${pc.dim(`(${c.ageDays}d)`)}`);
+      }
+      console.log(pc.cyan(`\n📨 Nuevos: ${b.newSince.totalIncoming} mensajes`));
+      if (b.upcomingEvents.length > 0) {
+        console.log(pc.cyan(`\n📅 Próximo`));
+        for (const e of b.upcomingEvents.slice(0, 5)) console.log(`   ${fmtTime(e.start_ts)} · ${e.title}`);
+      }
+      if (b.openTasks.length > 0) {
+        console.log(pc.cyan(`\n✅ Tareas`));
+        for (const t of b.openTasks.slice(0, 5)) console.log(`   ${t.title}`);
+      }
+      console.log();
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("members <group>")
+  .description("Group participants; --analyze builds a profile for each one")
+  .option("--analyze", "build style profiles + facts per member", false)
+  .option("--min <n>", "minimum messages", "20")
+  .action(async (group: string, opts: { analyze: boolean; min: string }) => {
+    try {
+      if (opts.analyze) {
+        console.log(pc.cyan("Analizando miembros (sin IA)..."));
+        const r = (await client.analyzeGroupMembers(group, Number(opts.min))) as {
+          groupName: string | null; members: { name: string | null; jid: string; messages: number; factsFound: number; styleSummary: string | null }[];
+        };
+        console.log(pc.bold(`\n${r.groupName ?? group} — ${r.members.length} perfiles construidos\n`));
+        for (const m of r.members) {
+          console.log(`${pc.bold(m.name ?? m.jid)} ${pc.dim(`${m.messages} msgs · ${m.factsFound} hechos`)}`);
+          if (m.styleSummary) console.log(pc.dim(`   ${m.styleSummary.slice(0, 100)}`));
+        }
+        return;
+      }
+      const r = (await client.groupMembers(group, Number(opts.min))) as {
+        groupName: string | null; members: { name: string | null; jid: string; messages: number; hasProfile: boolean }[];
+      };
+      console.log(pc.bold(`${r.groupName ?? group} — ${r.members.length} participantes\n`));
+      for (const m of r.members) {
+        console.log(`${pc.bold((m.name ?? m.jid).slice(0, 30).padEnd(30))} ${pc.dim(`${m.messages} msgs`)} ${m.hasProfile ? pc.green("✓perfil") : pc.dim("sin perfil")}`);
+      }
+      console.log(pc.dim("\nconstruir perfiles: wacon members <group> --analyze"));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("skills")
+  .description("Install the bundled agent skills (all of them, one command)")
+  .option("--force", "overwrite existing installs", false)
+  .option("--target <dir>", "where to install")
+  .action((opts: { force: boolean; target?: string }) => {
+    const r = installSkills(opts.target ?? defaultSkillsTarget(), opts.force);
+    if (r.installed.length > 0) console.log(pc.green(`✔ instaladas: ${r.installed.join(", ")}`));
+    if (r.skipped.length > 0) console.log(pc.dim(`ya existían: ${r.skipped.join(", ")} (usa --force para sobrescribir)`));
+    if (r.installed.length === 0 && r.skipped.length === 0) console.log(pc.yellow("no encontré skills incluidas"));
+    console.log(pc.dim(`destino: ${r.target}`));
+  });
+
+program
   .command("stickers")
   .description("Sticker library (own + cat pack) and per-contact habits")
   .option("--sync", "rebuild the catalog", false)
@@ -464,12 +635,14 @@ program
   .action(async () => {
     try {
       const report = await client.doctor();
-      for (const c of report.checks) {
-        const icon = c.status === "ok" ? pc.green("✓") : c.status === "warn" ? pc.yellow("⚠") : pc.red("✗");
-        console.log(`${icon} ${pc.bold(c.name)}: ${c.detail}`);
-        if (c.fix) console.log(pc.dim(`    → ${c.fix}`));
-      }
-      console.log(report.healthy ? pc.green("\nTodo lo esencial funciona.") : pc.red("\nHay problemas que resolver."));
+      emit(report, () => {
+        for (const check of report.checks) {
+          const icon = check.status === "ok" ? pc.green("✓") : check.status === "warn" ? pc.yellow("⚠") : pc.red("✗");
+          console.log(`${icon} ${pc.bold(check.name)}: ${check.detail}`);
+          if (check.fix) console.log(pc.dim(`    → ${check.fix}`));
+        }
+        console.log(report.healthy ? pc.green("\nTodo lo esencial funciona.") : pc.red("\nHay problemas que resolver."));
+      });
     } catch (err) {
       die(err);
     }

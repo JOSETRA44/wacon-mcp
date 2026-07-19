@@ -191,6 +191,24 @@ export class DaemonClient implements WaconApi {
   dismissSuggestedEvent(id: number): ReturnType<WaconApi["dismissSuggestedEvent"]> {
     return this.rpc("dismissSuggestedEvent", [id]);
   }
+  readReceiptsMode(): ReturnType<WaconApi["readReceiptsMode"]> {
+    return this.rpc("readReceiptsMode", [], 20_000);
+  }
+  inbox(limit?: number, includeGroups?: boolean): ReturnType<WaconApi["inbox"]> {
+    return this.rpc("inbox", [limit, includeGroups]);
+  }
+  commitments(sinceDays?: number): ReturnType<WaconApi["commitments"]> {
+    return this.rpc("commitments", [sinceDays]);
+  }
+  briefing(sinceMinutes?: number): ReturnType<WaconApi["briefing"]> {
+    return this.rpc("briefing", [sinceMinutes]);
+  }
+  groupMembers(group: string, minMessages?: number): ReturnType<WaconApi["groupMembers"]> {
+    return this.rpc("groupMembers", [group, minMessages]);
+  }
+  analyzeGroupMembers(group: string, minMessages?: number): ReturnType<WaconApi["analyzeGroupMembers"]> {
+    return this.rpc("analyzeGroupMembers", [group, minMessages], 180_000);
+  }
   syncStickers(): ReturnType<WaconApi["syncStickers"]> {
     return this.rpc("syncStickers", [], 120_000);
   }

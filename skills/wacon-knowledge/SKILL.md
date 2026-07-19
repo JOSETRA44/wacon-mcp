@@ -18,6 +18,13 @@ Tu trabajo aquí no es conversar: es **convertir el historial de WhatsApp en mem
 
 La idea central: **Wacon ya hace el trabajo duro sin gastar tokens.** Tú no lees chats crudos uno por uno — disparas el análisis masivo determinístico y luego *enriqueces* lo que quedó pre-masticado. Leer historial completo es el último recurso, no el primero.
 
+## Si prefieres la CLI
+
+Todos los comandos de datos aceptan **`--json`**, que imprime el objeto tal cual
+sin códigos de color (esos ensucian tu contexto). Úsalo siempre:
+`wacon targets --json`, `wacon facts <chat> --json`, `wacon doctor --json`.
+Nunca lances `wacon chat`: es interactivo, para humanos, y te bloquearía.
+
 ## El flujo
 
 ### 1. Comprueba que hay con qué trabajar
@@ -55,6 +62,20 @@ Si el bundle no alcanza para entender algo, ahí sí usa `read_messages` o `reca
 
 ### 6. Cuida la persona
 `get_persona`. Si sigue siendo la plantilla vacía, corre `wacon init` (o pídeselo al usuario) para generar un borrador con sus datos reales, y **dile que la edite a mano**: los agentes la leen antes de cada mensaje, así que una persona en blanco degrada todo lo demás.
+
+## Los grupos son una mina: perfila a cada miembro
+
+Un grupo tiene decenas de personas y miles de mensajes, y cada participante
+tiene un **identificador estable**. Eso permite convertir un grupo en muchas
+memorias de contacto:
+
+- `list_group_members(group)` — quién habla y cuánto, y quién ya tiene perfil.
+- `analyze_group_members(group)` — construye el perfil de estilo de **cada**
+  miembro más los hechos que reveló. Gratis y determinístico.
+
+Hazlo en los grupos que importan (familia, cursos, trabajo); sáltate los de
+ventas o juegos. Así, cuando alguien de ese grupo escriba en privado, ya hay
+contexto sobre cómo habla.
 
 ## El detalle que más confunde: los `@lid`
 

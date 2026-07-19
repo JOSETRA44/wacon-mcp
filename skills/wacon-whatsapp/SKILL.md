@@ -19,6 +19,23 @@ Wacon expone el WhatsApp real del usuario vía MCP. Enviar un mensaje es actuar
 bien, es sonar exactamente como el usuario suena con ese contacto. Un mensaje
 demasiado formal a su mejor amigo delata a la IA tan rápido como un error.
 
+## Si usas la CLI en vez del MCP
+
+Algunos agentes prefieren la terminal. Perfecto — pero **añade siempre `--json`**:
+
+```bash
+wacon inbox --json      # ✅ objeto limpio, cero códigos ANSI
+wacon inbox             # ❌ pensado para humanos: colores que ensucian tu contexto
+```
+
+Con `--json` el comando imprime el objeto tal cual y los errores llegan como
+`{"ok":false,"error":"..."}` con código de salida 1. Funciona en `inbox`,
+`brief`, `commitments`, `chats`, `read`, `search`, `resolve`, `targets`,
+`status`, `doctor` y demás comandos de datos.
+
+`wacon chat` es la excepción: es interactivo y **solo para humanos** — no lo
+lances, se quedaría bloqueado.
+
 ## Conexión
 
 - Tools disponibles si el MCP `wacon` está registrado (`claude mcp add wacon -- wacon mcp`).
@@ -141,6 +158,22 @@ menciones el problema al contacto.
   María — 30 min hasta inicio"), TÚ decides si mandas un mensaje proactivo
   ("¿sigue en pie lo de las 5?"). Confirma con el criterio del perfil/persona;
   ante duda, no envíes.
+
+## Ponerse al día (productividad)
+
+Si el usuario dice "ponme al día", "qué me falta responder", "ayúdame con mis
+mensajes" o "qué quedé en hacer", **no listes chats a ciegas**:
+
+- **`get_briefing`** — una llamada: pendientes, compromisos, novedades, agenda.
+  Es la mejor forma de abrir una sesión.
+- **`get_inbox`** — chats donde la otra persona habló último, priorizados (te
+  preguntaron algo, mensajes acumulados, recencia). Los canales de difusión no
+  aparecen porque no se les puede responder.
+- **`get_commitments`** — promesas suyas sin cumplir. Verifica antes de darlas
+  por incumplidas: pudo resolverlo por otro medio.
+
+Preséntaselo por prioridad y ofrécele ayuda concreta con los primeros, no un
+volcado de todo.
 
 ## Lectura y análisis sin enviar
 

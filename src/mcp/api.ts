@@ -96,6 +96,12 @@ export interface WaconApi {
   listSuggestedEvents(status?: string, limit?: number): Promise<{ id: number; chat: string; chatName: string | null; title: string; when: string | null; raw: string | null }[]>;
   confirmSuggestedEvent(id: number, notifyBeforeMinutes?: number): Promise<{ confirmed: boolean; eventId?: number }>;
   dismissSuggestedEvent(id: number): Promise<{ dismissed: boolean }>;
+  readReceiptsMode(): Promise<"on" | "off" | "unknown">;
+  inbox(limit?: number, includeGroups?: boolean): Promise<unknown[]>;
+  commitments(sinceDays?: number): Promise<unknown[]>;
+  briefing(sinceMinutes?: number): Promise<unknown>;
+  groupMembers(group: string, minMessages?: number): Promise<unknown>;
+  analyzeGroupMembers(group: string, minMessages?: number): Promise<unknown>;
   syncStickers(): Promise<{ packImported: number; ownIndexed: number; habits: number }>;
   listStickers(opts?: { mood?: string; chat?: string; limit?: number }): Promise<unknown>;
   sendSticker(chat: string, stickerId: string, clientName: string): Promise<SendResult | Guided>;
@@ -160,6 +166,12 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
     listSuggestedEvents: async (status, limit) => service.listSuggestedEvents(status, limit),
     confirmSuggestedEvent: async (id, notifyBeforeMinutes) => service.confirmSuggestedEvent(id, notifyBeforeMinutes),
     dismissSuggestedEvent: async (id) => service.dismissSuggestedEvent(id),
+    readReceiptsMode: () => service.readReceiptsMode(),
+    inbox: async (limit, includeGroups) => service.inbox(limit, includeGroups),
+    commitments: async (sinceDays) => service.commitments(sinceDays),
+    briefing: async (sinceMinutes) => service.briefing(sinceMinutes),
+    groupMembers: async (group, minMessages) => service.groupMembers(group, minMessages),
+    analyzeGroupMembers: async (group, minMessages) => service.analyzeGroupMembers(group, minMessages),
     syncStickers: async () => service.syncStickers(),
     listStickers: async (opts) => service.listStickers(opts),
     sendSticker: (chat, stickerId, clientName) => service.sendSticker(chat, stickerId, clientName),

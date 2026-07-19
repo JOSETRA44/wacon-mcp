@@ -334,6 +334,15 @@ CREATE TABLE IF NOT EXISTS jid_map (
 CREATE INDEX IF NOT EXISTS idx_jidmap_pn ON jid_map (pn);
 `;
 
+/**
+ * WhatsApp Channels (@newsletter) are broadcast-only — you cannot reply to
+ * them — and bot endpoints aren't relationships either. Excluding them keeps
+ * the inbox and the contact analysis about actual people; otherwise a channel
+ * with 600 unread "unanswered" messages buries the friend who's waiting.
+ */
+const CONVERSATIONAL_ONLY = `AND {col} NOT LIKE '%@newsletter' AND {col} NOT LIKE '%@bot' AND {col} NOT LIKE '%@broadcast'`;
+const conversational = (col: string) => CONVERSATIONAL_ONLY.replaceAll("{col}", col);
+
 export class Store {
   readonly db: Database.Database;
 
@@ -753,6 +762,82 @@ export class Store {
     }[];
   }
 
+  // ── productivity: inbox, commitments, group members ──────
+
+  /**
+   * Chats whose LAST message came from the other person — i.e. the ball is in
+   * the user's court. The backbone of "what do I still owe a reply to?".
+   */
+  pendingReplies(limit = 30, includeGroups = false): {
+    chat_jid: string; display_name: string | null; is_group: number;
+    last_ts: number; last_text: string | null; waiting_hours: number; incoming_since: number;
+  }[] {
+    const groupFilter = includeGroups ? "" : "AND m.chat_jid NOT LIKE '%@g.us'";
+    return this.db
+      .prepare(
+        `WITH last AS (
+           SELECT chat_jid, MAX(timestamp) last_ts FROM messages GROUP BY chat_jid
+         )
+         SELECT m.chat_jid,
+                COALESCE(c.name, ct.name, ct.notify_name) display_name,
+                COALESCE(c.is_group, 0) is_group,
+                m.timestamp last_ts,
+                m.text last_text,
+                ROUND((? - m.timestamp) / 3600000.0, 1) waiting_hours,
+                (SELECT COUNT(*) FROM messages x
+                  WHERE x.chat_jid = m.chat_jid AND x.from_me = 0
+                    AND x.timestamp > COALESCE((SELECT MAX(y.timestamp) FROM messages y WHERE y.chat_jid = m.chat_jid AND y.from_me = 1), 0)
+                ) incoming_since
+         FROM messages m
+         JOIN last l ON l.chat_jid = m.chat_jid AND l.last_ts = m.timestamp
+         LEFT JOIN chats c ON c.jid = m.chat_jid
+         LEFT JOIN contacts ct ON ct.jid = m.chat_jid
+         WHERE m.from_me = 0 ${groupFilter} ${conversational("m.chat_jid")}
+         ORDER BY m.timestamp DESC LIMIT ?`
+      )
+      .all(Date.now(), limit) as ReturnType<Store["pendingReplies"]>;
+  }
+
+  /** Outgoing messages that sound like a promise, with whether the user wrote again after. */
+  commitmentCandidates(sinceDays = 21, limit = 200): {
+    chat_jid: string; display_name: string | null; timestamp: number; text: string;
+  }[] {
+    const since = Date.now() - sinceDays * 86_400_000;
+    return this.db
+      .prepare(
+        `SELECT m.chat_jid, COALESCE(c.name, ct.name, ct.notify_name) display_name, m.timestamp, m.text
+         FROM messages m
+         LEFT JOIN chats c ON c.jid = m.chat_jid
+         LEFT JOIN contacts ct ON ct.jid = m.chat_jid
+         WHERE m.from_me = 1 AND m.text IS NOT NULL AND m.timestamp > ?
+         ORDER BY m.timestamp DESC LIMIT ?`
+      )
+      .all(since, limit) as ReturnType<Store["commitmentCandidates"]>;
+  }
+
+  /** Participants of a group with how much each one talks — the unit of group profiling. */
+  groupMembers(groupJid: string, minMessages = 20): { sender_jid: string; display_name: string | null; total: number }[] {
+    return this.db
+      .prepare(
+        `SELECT m.sender_jid, COALESCE(ct.name, ct.notify_name) display_name, COUNT(*) total
+         FROM messages m LEFT JOIN contacts ct ON ct.jid = m.sender_jid
+         WHERE m.chat_jid = ? AND m.from_me = 0 AND m.sender_jid IS NOT NULL AND m.text IS NOT NULL
+         GROUP BY m.sender_jid HAVING total >= ? ORDER BY total DESC`
+      )
+      .all(groupJid, minMessages) as { sender_jid: string; display_name: string | null; total: number }[];
+  }
+
+  /** All messages a specific participant wrote in a group. */
+  memberMessages(groupJid: string, senderJid: string, limit = 1000): MessageRow[] {
+    return this.db
+      .prepare(
+        `SELECT id, chat_jid, sender_jid, from_me, timestamp, text, message_type, quoted_id
+         FROM messages WHERE chat_jid = ? AND sender_jid = ? AND text IS NOT NULL
+         ORDER BY timestamp DESC LIMIT ?`
+      )
+      .all(groupJid, senderJid, limit) as MessageRow[];
+  }
+
   // ── sticker library ──────────────────────────────────────
 
   upsertSticker(s: { id: string; origin: string; pack: string | null; mood: string | null; filePath: string | null; chatJid: string | null; msgId: string | null; description: string | null }): void {
@@ -990,7 +1075,8 @@ export class Store {
     const rows = this.db
       .prepare(
         `SELECT m.chat_jid jid, COUNT(*) total, COALESCE(SUM(m.from_me),0) outgoing
-         FROM messages m GROUP BY m.chat_jid HAVING outgoing >= ? ORDER BY outgoing DESC LIMIT ?`
+         FROM messages m WHERE 1=1 ${conversational("m.chat_jid")}
+         GROUP BY m.chat_jid HAVING outgoing >= ? ORDER BY outgoing DESC LIMIT ?`
       )
       .all(minOutgoing, limit) as { jid: string; total: number; outgoing: number }[];
     return rows.map((r) => ({
