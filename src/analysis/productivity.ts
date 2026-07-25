@@ -14,6 +14,7 @@ export interface PendingReply {
   waitingHours: number;
   unansweredCount: number;
   lastMessage: string | null;
+  lastTimestamp: number;
   priority: number;
   reasons: string[];
 }
@@ -57,6 +58,7 @@ export function pendingReplies(store: Store, opts: { limit?: number; includeGrou
         waitingHours: r.waiting_hours,
         unansweredCount: r.incoming_since,
         lastMessage: r.last_text ? r.last_text.slice(0, 120) : null,
+        lastTimestamp: r.last_ts,
         priority: Math.min(100, priority),
         reasons,
       };

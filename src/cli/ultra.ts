@@ -115,7 +115,7 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
 
   const input = blessed.textbox({
     parent: screen,
-    label: " Mensaje (Enter envía · Tab cambia panel · ? ayuda) ",
+    label: " Mensaje (Enter envía · Ctrl+N/P cambia chat · Esc lista · ? ayuda) ",
     bottom: 1,
     left: "32%",
     width: "68%",
@@ -147,7 +147,7 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
   let running = true;
 
   const setStatus = (text: string) => {
-    statusBar.setContent(` {cyan-fg}Wacon{/} · ${text} · {gray-fg}Tab paneles · / buscar · Ctrl+O adjuntar · Ctrl+C salir{/}`);
+    statusBar.setContent(` {cyan-fg}Wacon{/} · ${text} · {gray-fg}Ctrl+N/P chat · Ctrl+K buscar · Ctrl+O adjuntar · Ctrl+C salir{/}`);
     screen.render();
   };
 
@@ -163,23 +163,32 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
   };
 
   const loadChats = async () => {
-    // inbox first (pending), then fill with the rest of recent chats.
+    // WhatsApp Web orders by conversation recency, full stop — unread status
+    // is a badge, not a sort key. The old code put pending (unanswered)
+    // chats first with a fake `lastTs: Date.now()`, which is why the order
+    // looked like "most unread wins": every pending chat tied for newest
+    // regardless of when it actually last spoke. Fixed by merging both
+    // sources into one map keyed by jid and sorting by real timestamp.
     const [inbox, chats] = await Promise.all([
-      client.inbox(40, false).catch(() => []),
-      client.listChats(60).catch(() => []),
+      client.inbox(60, false).catch(() => []),
+      client.listChats(80).catch(() => []),
     ]);
-    const seen = new Set<string>();
-    const merged: ChatRow[] = [];
-    for (const p of inbox as { chat: string; name: string | null; unansweredCount: number; lastMessage: string | null }[]) {
-      seen.add(p.chat);
-      merged.push({ jid: p.chat, name: p.name ?? p.chat, unread: p.unansweredCount, lastTs: Date.now(), preview: p.lastMessage ?? "" });
+    const byJid = new Map<string, ChatRow>();
+    for (const c of chats as { jid: string; display_name: string | null; last_message_ts: number | null }[]) {
+      byJid.set(c.jid, { jid: c.jid, name: c.display_name ?? c.jid, unread: 0, lastTs: c.last_message_ts ?? 0, preview: "" });
     }
-    for (const chDesc of chats as { jid: string; display_name: string | null; last_message_ts: number | null }[]) {
-      if (seen.has(chDesc.jid)) continue;
-      merged.push({ jid: chDesc.jid, name: chDesc.display_name ?? chDesc.jid, unread: 0, lastTs: chDesc.last_message_ts ?? 0, preview: "" });
+    for (const p of inbox as { chat: string; name: string | null; unansweredCount: number; lastMessage: string | null; lastTimestamp: number }[]) {
+      const prev = byJid.get(p.chat);
+      byJid.set(p.chat, {
+        jid: p.chat,
+        name: p.name ?? prev?.name ?? p.chat,
+        unread: p.unansweredCount,
+        lastTs: p.lastTimestamp || prev?.lastTs || 0,
+        preview: p.lastMessage ?? prev?.preview ?? "",
+      });
     }
-    rows = merged;
-    filtered = merged;
+    rows = [...byJid.values()].sort((a, b) => b.lastTs - a.lastTs);
+    filtered = rows;
     renderList();
   };
 
@@ -247,11 +256,15 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
             renderLine({ from_me: 0, text: e.text, timestamp: new Date(e.at).getTime(), message_type: e.type, id: e.id });
             convo.setScrollPerc(100);
             await client.markRead(activeJid, 5).catch(() => undefined);
+            const row = rows.find((x) => x.jid === e.chat);
+            if (row) row.lastTs = Date.now();
           } else {
-            // Bump the sender to the top of the list with an unread badge.
+            // Bump the sender to the top of the list (real recency, matching
+            // how the list is sorted) with an unread badge.
             const row = rows.find((x) => x.jid === e.chat);
             if (row) {
               row.unread += 1;
+              row.lastTs = Date.now();
               rows = [row, ...rows.filter((x) => x.jid !== row.jid)];
             } else {
               rows.unshift({ jid: e.chat, name: e.chatName ?? e.chat, unread: 1, lastTs: Date.now(), preview: e.text ?? "" });
@@ -364,29 +377,56 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
   };
 
   // ── key bindings ─────────────────────────────────────────
+  // blessed's List already fires 'select' on Enter (see list.js's
+  // `enterSelected`) — a separate chatList.key(["enter"]) handler used to
+  // double-fire openChat() on every Enter press. One listener now.
   chatList.on("select", (_item: unknown, index: unknown) => {
     const r = filtered[Number(index)];
     if (r) void openChat({ jid: r.jid, name: r.name });
   });
-  input.key(["escape", "tab"], () => chatList.focus());
+
+  // Jump to the list with the currently-open chat highlighted, not always
+  // index 0 — so arrow keys continue naturally from wherever you are.
+  const focusList = () => {
+    const idx = target ? filtered.findIndex((r) => r.jid === target!.jid) : -1;
+    if (idx >= 0) chatList.select(idx);
+    chatList.focus();
+  };
+  input.key(["escape", "tab"], focusList);
   chatList.key(["tab"], () => armInput());
-  chatList.key(["enter"], () => {
-    const r = filtered[chatList.selected ?? 0];
-    if (r) void openChat({ jid: r.jid, name: r.name });
-  });
 
   // Enter on the conversation pane opens the most recent media.
   convo.key(["enter"], () => {
     if (mediaSlots.length > 0) void viewMedia(mediaSlots.length);
   });
 
-  // '/' and '?' are ordinary typable characters, so they stay screen-only —
-  // blessed suppresses screen-level keys while `input` is actively reading
-  // (grabKeys), which is exactly what we want: they must not hijack a
-  // literal "/" or "?" typed into a message.
-  screen.key(["/"], () => {
+  // Cycle chats directly without ever leaving the keyboard flow — this is
+  // the main "cambiar de chat" fix: you no longer have to blur the input,
+  // find the list, arrow around and Enter just to hop to the next
+  // conversation. Ctrl+N/Ctrl+P are non-typable, so — like Ctrl+F/O/S — they
+  // work both while browsing the list AND while composing a message.
+  const stepChat = (dir: 1 | -1) => {
+    if (filtered.length === 0) return;
+    const idx = target ? filtered.findIndex((r) => r.jid === target!.jid) : -1;
+    const next = filtered[(idx + dir + filtered.length) % filtered.length];
+    if (next) void openChat({ jid: next.jid, name: next.name });
+  };
+  const nextChat = () => stepChat(1);
+  const prevChat = () => stepChat(-1);
+  screen.key(["C-n"], nextChat);
+  screen.key(["C-p"], prevChat);
+  input.key(["C-n"], nextChat);
+  input.key(["C-p"], prevChat);
+
+  // '/' opens the chat search/jump prompt but only from the list (it's a
+  // typable character, must not hijack a literal "/" in a message). Ctrl+K
+  // is the same prompt, reachable even while composing.
+  const jumpToChat = () => {
     void prompt("buscar chat").then((q) => applyFilter(q ?? ""));
-  });
+  };
+  screen.key(["/"], jumpToChat);
+  screen.key(["C-k"], jumpToChat);
+  input.key(["C-k"], jumpToChat);
 
   const searchConvo = () => {
     if (!target) return;
@@ -437,10 +477,12 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
 
   const HELP =
     "{bold}Wacon ultra{/}\n\n" +
-    "  ↑↓        moverse en el panel\n" +
-    "  Tab       cambiar entre lista y mensaje\n" +
+    "  Ctrl+N/P  chat siguiente / anterior (funciona escribiendo)\n" +
+    "  Ctrl+K    buscar/saltar a un chat (funciona escribiendo)\n" +
+    "  Esc/Tab   ir a la lista de chats\n" +
+    "  ↑↓        moverse en la lista\n" +
     "  Enter     abrir chat / enviar / ver media\n" +
-    "  /         buscar un chat\n" +
+    "  /         buscar un chat (solo desde la lista)\n" +
     "  Ctrl+F    buscar dentro de la conversación\n" +
     "  Ctrl+O    adjuntar un archivo (imagen, PDF, audio…)\n" +
     "  Ctrl+S    enviar un sticker\n" +

@@ -96,9 +96,9 @@ Ambos son **pura presentación** sobre el mismo `DaemonClient` — cero lógica 
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-- **Panel izquierdo**: lista de chats (pendientes primero, badge de no leídos, el activo resaltado). Los mensajes que llegan de otros chats **suben ese chat arriba** con su badge.
-- **Panel derecho**: conversación con scroll nativo y feed en vivo (mismo long-poll `waitForMessages`).
-- **Teclas** (no comandos crípticos): `↑↓` mover · `Tab` alternar panel · `Enter` abrir/enviar · `/` buscar chat · `Ctrl+F` buscar en la conversación · `Ctrl+O` adjuntar archivo · `Ctrl+S` sticker · `Enter` sobre la conversación abre la última media · `?`/`F1` ayuda · `Ctrl+C` sale y **restaura la terminal**.
+- **Panel izquierdo**: lista de chats ordenada por **recencia real** (igual que WhatsApp Web — el chat con el mensaje más nuevo va arriba), con badge de no leídos y el activo resaltado. El no-leído es una insignia, no un criterio de orden. Los mensajes que llegan de otros chats **suben ese chat arriba**.
+- **Panel derecho**: conversación con scroll nativo y feed en vivo (mismo long-poll `waitForMessages`), con divisores de día y mensajes agrupados por turno de quien habla.
+- **Teclas**: `Ctrl+N`/`Ctrl+P` chat siguiente/anterior (funcionan **incluso escribiendo un mensaje** — es la forma rápida de cambiar de chat) · `Ctrl+K` buscar/saltar a un chat (también funciona escribiendo) · `Esc`/`Tab` ir a la lista (recuerda dónde estabas) · `↑↓` mover en la lista · `Enter` abrir/enviar/ver media · `/` buscar chat (solo desde la lista, para no chocar con un "/" escrito en un mensaje) · `Ctrl+F` buscar en la conversación · `Ctrl+O` adjuntar archivo · `Ctrl+S` sticker · `?`/`F1` ayuda · `Ctrl+C` sale siempre (incluso escribiendo) y **restaura la terminal**.
 
 **Motor**: `neo-blessed` (JS puro, sin binarios nativos), **cargado perezosamente** con `await import()` solo al entrar a este modo — los agentes y el resto de comandos no lo cargan nunca (verificado: `wacon inbox --json` sigue sin ANSI y sin tocar blessed). Sin TTY o sin la dependencia, degrada con un mensaje claro que remite a `wacon chat`.
 
