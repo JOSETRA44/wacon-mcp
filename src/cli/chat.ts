@@ -1,9 +1,12 @@
 import * as readline from "node:readline";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 import type { DaemonClient } from "../daemon/client.js";
 import { WACON_HOME } from "../core/paths.js";
 import { c } from "./output.js";
+import { nextTip, tipById, renderTip } from "./tips.js";
+import { type ChatTarget, type MediaKind, shortTime as time, resolveTarget, mediaKindOf, openWithSystemViewer } from "./chat-core.js";
 
 const LAST_CHAT_FILE = join(WACON_HOME, "last-chat.json");
 
@@ -36,14 +39,6 @@ function recallChat(): ChatTarget | null {
  * Agents should NOT drive this — it's interactive and blocks. They have the MCP
  * tools, or the regular commands with --json.
  */
-
-interface ChatTarget {
-  jid: string;
-  name: string;
-}
-
-const time = (ts: number | string) =>
-  new Date(ts).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 
 function line(text = ""): void {
   process.stdout.write(`${text}\n`);
@@ -89,24 +84,23 @@ async function pickChat(client: DaemonClient, rl: readline.Interface): Promise<C
   return { jid: chosen.chat, name: chosen.name ?? chosen.chat };
 }
 
-async function resolveTarget(client: DaemonClient, query: string): Promise<ChatTarget | null> {
-  const hits = await client.resolveContact(query);
-  if (hits.length === 0) return null;
-  const best = hits[0]!;
-  return { jid: best.jid, name: best.displayName ?? best.jid };
-}
-
 async function showHeader(client: DaemonClient, target: ChatTarget): Promise<void> {
   const [status, receipts] = await Promise.all([client.status(), client.readReceiptsMode().catch(() => "unknown" as const)]);
   const conn = status.state === "connected" ? c.green("conectado") : c.red(status.state);
   const ticks = receipts === "on" ? "vistos: on" : receipts === "off" ? "vistos: off" : "vistos: ?";
   line(`\n${c.dim("──")} ${c.bold(target.name)} ${c.dim("·")} ${conn} ${c.dim(`· ${ticks}`)} ${c.dim("─".repeat(Math.max(0, 40 - target.name.length)))}`);
+  // Always-visible way out. Getting stuck in a chat with no obvious exit was
+  // the single most confusing thing for someone opening this the first time.
+  line(c.dim(`   ${c.bold("Esc")} volver a la lista · ${c.bold("/help")} comandos · ${c.bold("Tab")} autocompletar`));
 }
 
 async function loadHistory(client: DaemonClient, target: ChatTarget, limit = 25): Promise<void> {
   const msgs = await client.readMessages(target.jid, limit);
+  mediaSlots = []; // numbering is per conversation
   for (const m of msgs.slice().reverse()) {
-    line(renderMessage(m, "yo", target.name.split(" ")[0] ?? "él/ella"));
+    const slot = registerMedia(m.id, m.message_type, m.text);
+    const rendered = renderMessage(m, "yo", target.name.split(" ")[0] ?? "él/ella");
+    line(slot ? `${rendered} ${c.cyan(`/ver ${slot}`)}` : rendered);
   }
   line();
 }
@@ -116,6 +110,22 @@ async function loadHistory(client: DaemonClient, target: ChatTarget, limit = 25)
  * a single `/2`. Keeps the most recent few — enough to act on, not a menu.
  */
 const jumpSlots: ChatTarget[] = [];
+
+/** Media seen in the current conversation, numbered so `/ver 2` is unambiguous. */
+interface MediaSlot {
+  messageId: string;
+  kind: MediaKind;
+  label: string;
+}
+let mediaSlots: MediaSlot[] = [];
+
+function registerMedia(messageId: string, messageType: string | undefined, text: string | null): number | null {
+  const kind = mediaKindOf(messageType, text);
+  if (!kind) return null;
+  mediaSlots.push({ messageId, kind, label: (text ?? messageType ?? "").slice(0, 40) });
+  if (mediaSlots.length > 20) mediaSlots.shift();
+  return mediaSlots.length;
+}
 
 function rememberElsewhere(name: string, jid: string): number {
   const existing = jumpSlots.findIndex((s) => s.jid === jid);
@@ -127,9 +137,10 @@ function rememberElsewhere(name: string, jid: string): number {
 
 const HELP = `
 ${c.bold("Comandos")}
+  ${c.bold("Esc")}               volver a la lista de chats  ${c.dim("(o /atras, /volver, /chats)")}
   /1 … /9           saltar a un chat que te escribió (aparece el número al avisarte)
-  /chats            elegir otra conversación
   /switch <texto>   cambiar a un contacto por nombre/número
+  /ver <n>          abrir una imagen/audio recibido en tu visor
   /send <archivo>   enviar imagen, audio, PDF… (--voz para nota de voz)
   /read [n]         cargar más historial (por defecto 25)
   /search <texto>   buscar en esta conversación
@@ -182,10 +193,18 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
   let running = true;
   let typingSince = 0;
 
-  rememberChat(target);
-  await showHeader(client, target);
-  await loadHistory(client, target);
-  await client.markRead(target.jid).catch(() => undefined); // honours the account's receipt setting
+  /** Open a chat: remember it, show header + history, mark read, offer a tip. */
+  const openChat = async (next: ChatTarget): Promise<void> => {
+    target = next;
+    rememberChat(next);
+    await showHeader(client, next);
+    await loadHistory(client, next);
+    await client.markRead(next.jid).catch(() => undefined); // honours the account's receipt setting
+    const tip = nextTip();
+    if (tip) line(`${renderTip(tip)}\n`);
+  };
+
+  await openChat(target);
 
   // Live feed: long-poll in the background and print above the prompt.
   const feed = (async () => {
@@ -196,11 +215,13 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
         for (const e of r.events) {
           if (!running) break;
           if (e.chat === target!.jid) {
-            printAbovePrompt(rl, renderMessage(
+            const slot = registerMedia(e.id, e.type, e.text);
+            const rendered = renderMessage(
               { from_me: 0, text: e.text, timestamp: new Date(e.at).getTime(), message_type: e.type },
               "yo",
               target!.name.split(" ")[0] ?? "él/ella"
-            ));
+            );
+            printAbovePrompt(rl, slot ? `${rendered} ${c.cyan(`/ver ${slot}`)}` : rendered);
             await client.markRead(target!.jid, 5).catch(() => undefined);
           } else {
             // Someone else wrote you. Silently dropping this was the worst bit
@@ -226,8 +247,26 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
 
   rl.prompt();
 
-  // Show "escribiendo…" to the contact while the user actually types.
-  process.stdin.on("keypress", () => {
+  // Escape = go back to the chat list. A real key, because "type /chats" is
+  // not something a newcomer guesses.
+  let backPending = false;
+  process.stdin.on("keypress", (_ch, key: { name?: string; ctrl?: boolean } | undefined) => {
+    if (key?.name === "escape" || (key?.ctrl && key.name === "b")) {
+      if (backPending) return;
+      backPending = true;
+      void (async () => {
+        try {
+          const next = await pickChat(client, rl);
+          if (next) await openChat(next);
+          else line(c.dim("(sigues en esta conversación)"));
+        } finally {
+          backPending = false;
+          rl.prompt();
+        }
+      })();
+      return;
+    }
+    // Show "escribiendo…" to the contact while the user actually types.
     const now = Date.now();
     if (now - typingSince > 4000) {
       typingSince = now;
@@ -252,13 +291,7 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
           if (/^[1-9]$/.test(cmd ?? "")) {
             const slot = jumpSlots[Number(cmd) - 1];
             if (!slot) line(c.dim("ese número no corresponde a ningún aviso todavía"));
-            else {
-              target = slot;
-              rememberChat(target);
-              await showHeader(client, target);
-              await loadHistory(client, target);
-              await client.markRead(target.jid).catch(() => undefined);
-            }
+            else await openChat(slot);
             rl.prompt();
             return;
           }
@@ -273,26 +306,24 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
             case "help":
               line(HELP);
               break;
-            case "chats": {
+            // All the words someone might reach for to mean "go back".
+            case "chats":
+            case "back":
+            case "atras":
+            case "atrás":
+            case "volver":
+            case "lista":
+            case "menu":
+            case "menú": {
               const next = await pickChat(client, rl);
-              if (next) {
-                target = next;
-                await showHeader(client, target);
-                await loadHistory(client, target);
-                await client.markRead(target.jid).catch(() => undefined);
-              }
+              if (next) await openChat(next);
+              else line(c.dim("(sigues en esta conversación)"));
               break;
             }
             case "switch": {
               const next = arg ? await resolveTarget(client, arg) : null;
               if (!next) line(c.yellow(`No encontré "${arg}".`));
-              else {
-                target = next;
-                rememberChat(target);
-                await showHeader(client, target);
-                await loadHistory(client, target);
-                await client.markRead(target.jid).catch(() => undefined);
-              }
+              else await openChat(next);
               break;
             }
             case "read": {
@@ -317,6 +348,44 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
               else {
                 const r = await client.sendSticker(target!.jid, sticker.id, "cli");
                 line("guidance" in r ? c.yellow(`✖ ${r.guidance}`) : c.dim(` ${time(Date.now())}  ${c.green("yo")}  [sticker ${sticker.id}]`));
+              }
+              break;
+            }
+            case "ver":
+            case "abrir": {
+              const slot = mediaSlots[Number(arg) - 1];
+              if (!slot) {
+                line(c.dim(mediaSlots.length === 0 ? "no hay archivos en esta conversación todavía" : `usa /ver 1..${mediaSlots.length}`));
+                break;
+              }
+              if (slot.kind === "audio") {
+                line(c.dim("procesando el audio..."));
+                const r = await client.transcribeAudio(target!.jid, slot.messageId);
+                if ("guidance" in r) line(c.yellow(`✖ ${r.guidance}`));
+                else if (r.mode === "transcript") line(`${c.cyan("🎧")} ${r.text}`);
+                else {
+                  // No transcription backend: hand the audio to the OS player.
+                  const dir = join(tmpdir(), "wacon-media");
+                  mkdirSync(dir, { recursive: true });
+                  const file = join(dir, `${slot.messageId}.ogg`);
+                  writeFileSync(file, Buffer.from(r.base64, "base64"));
+                  openWithSystemViewer(file);
+                  line(c.dim(`abriendo audio: ${file}`));
+                }
+                break;
+              }
+              line(c.dim("descargando..."));
+              const r = await client.viewImage(target!.jid, slot.messageId);
+              if ("guidance" in r) line(c.yellow(`✖ ${r.guidance}`));
+              else {
+                const dir = join(tmpdir(), "wacon-media");
+                mkdirSync(dir, { recursive: true });
+                const ext = (r.mimetype.split("/")[1] ?? "jpg").replace(/[^a-z0-9]/gi, "") || "jpg";
+                const file = join(dir, `${slot.messageId}.${ext}`);
+                writeFileSync(file, Buffer.from(r.base64, "base64"));
+                openWithSystemViewer(file);
+                line(c.dim(`abriendo: ${file}`));
+                if (r.description) line(`${c.cyan("👁")} ${r.description}`);
               }
               break;
             }
@@ -346,8 +415,13 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
               }
               break;
             }
-            default:
+            default: {
               line(c.dim(`comando desconocido: /${cmd} — /help para la lista`));
+              // A fumbled command is the best moment to teach the way out.
+              const hint = tipById("back");
+              if (hint) line(renderTip(hint));
+              break;
+            }
           }
           rl.prompt();
           return;

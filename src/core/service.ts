@@ -35,6 +35,8 @@ export interface StatusInfo {
 export interface WaitResult {
   events: {
     seq: number;
+    /** The WhatsApp message id — needed to fetch its media (view/transcribe). */
+    id: string;
     chat: string;
     chatName: string | null;
     from: string | null;
@@ -307,6 +309,7 @@ export class WaconService {
     return {
       events: events.map((e: WatchEvent) => ({
         seq: e.seq,
+        id: e.message.id,
         chat: e.message.chat_jid,
         chatName: e.chatName,
         from: e.message.sender_jid,

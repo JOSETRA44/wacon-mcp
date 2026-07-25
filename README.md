@@ -131,13 +131,29 @@ wacon suggested         # accionables detectados; --confirm <id> para agendar
 ## WhatsApp en la terminal
 
 ```bash
-wacon chat            # elige entre tus conversaciones pendientes
+wacon chat            # cliente ligero: elige entre tus conversaciones pendientes
 wacon chat nayda      # abre una directamente
+wacon chat ultra      # app de pantalla completa (paneles, estilo WhatsApp Web)
 ```
+
+**Dos clientes, un motor.** `wacon chat` es el cliente ligero (cero dependencias, ideal por SSH o un vistazo rápido). **`wacon chat ultra`** (alias `wacon tui`) abre una app de terminal de pantalla completa: lista de chats a la izquierda, conversación a la derecha, búsqueda incremental con `/`, adjuntar con `Ctrl+O`, todo con teclas. Ambos son pura presentación sobre el mismo daemon — nada de lógica duplicada. La app usa `neo-blessed` cargado solo al entrar a ese modo, así que ni los agentes ni el resto de comandos pagan nada.
 
 Cliente de chat en la terminal, sin abrir un navegador y **sin dependencias nuevas**. Los mensajes entrantes aparecen en vivo mientras escribes, manda "escribiendo…" como un cliente real, y el scroll y el copiar/pegar de tu terminal siguen funcionando.
 
-Pensado para que no estorbe: si **otro contacto te escribe** te avisa en línea con un número para saltar (`/2`), **Tab** autocompleta comandos y nombres, y al reabrir puedes **continuar donde lo dejaste** con enter. Dentro: `/send <archivo>`, `/chats`, `/switch`, `/search`, `/sticker <mood>`, `/who`, `/quit`.
+**Fácil de aprender usándolo.** La cabecera siempre recuerda cómo salir (`Esc volver a la lista`), y unos tips progresivos —uno por sesión, sin repetirse— te van enseñando el resto:
+
+```
+── Nayda Quispe UTP · conectado · vistos: off ──────────
+   Esc volver a la lista · /help comandos · Tab autocompletar
+ 08:12 p.m.  Nayda  del sabado se traslado para domingo
+ 08:13 p.m.  Nayda  [nota de voz 0:17] /ver 3
+💡 Pulsa Esc para volver a la lista de chats (o escribe /atras).
+> _
+```
+
+Si **otro contacto te escribe** te avisa con un número para saltar (`/2`), **Tab** autocompleta, y al reabrir **continúas donde lo dejaste** con enter. Dentro: `/ver <n>`, `/send <archivo>`, `/switch`, `/search`, `/sticker <mood>`, `/who`, `/quit`.
+
+**Imágenes y audios recibidos:** cada uno se numera y `/ver <n>` lo abre en tu visor del sistema (una terminal no puede mostrarlos bien, así que no peleamos con eso). Si tienes configurado un backend de visión o transcripción, verás además la descripción o el texto del audio directamente.
 
 ## Enviar archivos
 
@@ -250,7 +266,7 @@ wacon watch [-m 30] [-p 40] [-g] | digest [-m 60] | window
 wacon init | profile <chat> [--note "..."] | persona
 wacon facts <chat> [--add "..." --category ...] | tag <chat> <tag> | untag | special
 wacon playbook <chat> "<situación>"
-wacon chat [contacto]        # WhatsApp interactivo en la terminal (humanos)
+wacon chat [contacto] | chat ultra | tui   # cliente ligero / app pantalla completa (humanos)
 wacon inbox | commitments | brief | members <grupo> [--analyze]
 wacon calendar [-d 30] | tasks | errors [--tail 20] | skills [--force]
 wacon daemon start|stop|log | config | mcp

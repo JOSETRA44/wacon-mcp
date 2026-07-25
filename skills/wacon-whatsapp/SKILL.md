@@ -33,8 +33,9 @@ Con `--json` el comando imprime el objeto tal cual y los errores llegan como
 `brief`, `commitments`, `chats`, `read`, `search`, `resolve`, `targets`,
 `status`, `doctor` y demás comandos de datos.
 
-`wacon chat` es la excepción: es interactivo y **solo para humanos** — no lo
-lances, se quedaría bloqueado.
+`wacon chat` y `wacon chat ultra` (la app de pantalla completa) son la
+excepción: son interactivos y **solo para humanos** — no los lances, se
+quedarían bloqueados. Para todo lo tuyo usa el MCP o los comandos con `--json`.
 
 ## Conexión
 

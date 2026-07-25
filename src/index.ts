@@ -368,12 +368,31 @@ program
   });
 
 program
-  .command("chat [contacto]")
-  .description("WhatsApp interactivo en la terminal (para humanos, no para agentes)")
-  .action(async (contacto: string | undefined) => {
+  .command("chat [contacto...]")
+  .description("WhatsApp interactivo en la terminal (para humanos). `wacon chat ultra` abre la app de pantalla completa.")
+  .action(async (parts: string[]) => {
     try {
       if (isJsonMode()) die("`wacon chat` es interactivo; los agentes deben usar el MCP o los comandos con --json");
-      await runChat(client, contacto);
+      // `wacon chat ultra [contacto]` → full-screen app; otherwise the light client.
+      if (parts[0]?.toLowerCase() === "ultra") {
+        const { runUltra } = await import("./cli/ultra.js");
+        await runUltra(client, parts.slice(1).join(" ") || undefined);
+      } else {
+        await runChat(client, parts.join(" ") || undefined);
+      }
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("tui [contacto]")
+  .description("Alias de `wacon chat ultra` — app de terminal de pantalla completa")
+  .action(async (contacto: string | undefined) => {
+    try {
+      if (isJsonMode()) die("`wacon tui` es interactivo; los agentes deben usar el MCP o los comandos con --json");
+      const { runUltra } = await import("./cli/ultra.js");
+      await runUltra(client, contacto);
     } catch (err) {
       die(err);
     }

@@ -74,6 +74,63 @@ Para agentes: la tool MCP `send_file` (rutas absolutas).
 
 Mismos guardrails que el texto (rate limit, `dryRun`, allowlist) y degradación con directriz si falla — verificado: archivo inexistente devuelve guía natural, nunca una excepción.
 
+## Dos clientes humanos, un solo motor
+
+| Comando | Qué es | Cuándo |
+|---|---|---|
+| `wacon chat` | Cliente línea a línea, cero dependencias | Rápido, por SSH, terminales pobres, un vistazo |
+| `wacon chat ultra` (alias `wacon tui`) | **App de pantalla completa** estilo WhatsApp Web | Vivir en WhatsApp desde la terminal |
+
+Ambos son **pura presentación** sobre el mismo `DaemonClient` — cero lógica de WhatsApp duplicada. Comparten helpers en `src/cli/chat-core.ts` (resolución de contacto `@lid`, clasificación de media, apertura en el visor del SO).
+
+## `wacon chat ultra` — la app de terminal
+
+```
+┌ Chats ───────────┬ Nayda Quispe UTP · vistos: off ────────────────┐
+│› Nayda        2  │  08:12  Nayda  nos reuniremos a las 9.30        │
+│  Brandon         │  07:55  yo     Si me parece bien                │
+│  Anderson     1  │  09:41  yo     Perdón, me pasé verdad?          │
+├──────────────────┴────────────────────────────────────────────────┤
+│ > escribe un mensaje…                                              │
+│  Wacon · N chats · Tab paneles · / buscar · Ctrl+O adjuntar · ?    │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+- **Panel izquierdo**: lista de chats (pendientes primero, badge de no leídos, el activo resaltado). Los mensajes que llegan de otros chats **suben ese chat arriba** con su badge.
+- **Panel derecho**: conversación con scroll nativo y feed en vivo (mismo long-poll `waitForMessages`).
+- **Teclas** (no comandos crípticos): `↑↓` mover · `Tab` alternar panel · `Enter` abrir/enviar · `/` buscar chat · `Ctrl+F` buscar en la conversación · `Ctrl+O` adjuntar archivo · `Ctrl+S` sticker · `Enter` sobre la conversación abre la última media · `?`/`F1` ayuda · `Ctrl+C` sale y **restaura la terminal**.
+
+**Motor**: `neo-blessed` (JS puro, sin binarios nativos), **cargado perezosamente** con `await import()` solo al entrar a este modo — los agentes y el resto de comandos no lo cargan nunca (verificado: `wacon inbox --json` sigue sin ANSI y sin tocar blessed). Sin TTY o sin la dependencia, degrada con un mensaje claro que remite a `wacon chat`.
+
+## Descubribilidad: que se aprenda usándolo
+
+El problema de un cliente de terminal es que **esconde sus funciones detrás de comandos que nadie sabe que existen**. Lo peor era quedarse dentro de un chat sin una salida obvia.
+
+**Tres capas, de menos a más intrusivo:**
+
+1. **Pista permanente** bajo la cabecera: `Esc volver a la lista · /help comandos · Tab autocompletar`. Siempre visible, no hay que recordarla.
+2. **Tecla real, no solo comando**: `Esc` (o `Ctrl+B`) vuelve a la lista. Además se aceptan todos los sinónimos que alguien intentaría: `/atras`, `/volver`, `/lista`, `/menu`, `/back`, `/chats`.
+3. **Tips progresivos** (`src/cli/tips.ts`): uno por sesión, en orden de necesidad, **sin repetirse nunca** (persistidos en `~/.wacon/tips-seen.json`). El primero enseña justo la salida:
+
+```
+💡 Pulsa Esc para volver a la lista de chats (o escribe /atras).
+💡 Tab autocompleta comandos y nombres: prueba /switch na + Tab.
+```
+
+Cuando se agotan, callan — quien ya sabe usar la herramienta no necesita que le insistan. Y si alguien escribe un comando que no existe, ese es el momento perfecto para recordarle cómo salir.
+
+## Ver imágenes y oír audios
+
+Una terminal no puede mostrar imágenes de forma fiable, así que **no peleamos con eso**: cada archivo recibido se numera y `/ver <n>` lo guarda y lo abre con **el visor de tu sistema** — que es lo que harías igualmente, y funciona en todas partes.
+
+```
+ 08:12 p.m.  Nayda  [imagen] /ver 2
+ 08:13 p.m.  Nayda  [nota de voz 0:17] /ver 3
+```
+
+- **Imágenes/videos** → se abren en tu visor. Si tienes backend de visión configurado, además verás la descripción (`👁`).
+- **Audios** → si hay transcripción configurada, la lees directamente (`🎧`); si no, se abre en tu reproductor.
+
 ## Menos fricción en el chat
 
 Cuatro problemas concretos que tenía y cómo se arreglaron:
