@@ -76,6 +76,7 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "sendSticker",
   "sendFile",
   "logout",
+  "relogin",
 ]);
 
 export async function runDaemon(): Promise<void> {

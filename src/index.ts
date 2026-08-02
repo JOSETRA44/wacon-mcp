@@ -40,6 +40,15 @@ program
     try {
       let lastQr: string | null = null;
       console.log(pc.cyan("Starting Wacon daemon and requesting QR..."));
+      // Ask for a NEW link attempt instead of only polling. A daemon that is
+      // already running sits in a terminal `logged_out` state after a logout
+      // or a lost session, and would never emit another QR on its own — this
+      // is what used to make `wacon login` hang for 3 minutes with no QR.
+      const { state: initial } = await client.relogin();
+      if (initial === "connected") {
+        console.log(pc.green("\n✔ Already linked — nothing to scan."));
+        return;
+      }
       const deadline = Date.now() + 180_000;
       while (Date.now() < deadline) {
         const { state, qr } = await client.qr();
@@ -56,7 +65,7 @@ program
         }
         await new Promise((r) => setTimeout(r, 1500));
       }
-      die("Timed out waiting for login (3 min). Try again.");
+      die(`Timed out waiting for login (3 min). Try again — if no QR ever appeared, check ${DAEMON_LOG_PATH}.`);
     } catch (err) {
       die(err);
     }

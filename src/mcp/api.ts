@@ -44,6 +44,8 @@ export interface GroupInfo {
 export interface WaconApi {
   status(): Promise<StatusInfo>;
   qr(): Promise<{ state: ConnectionState; qr: string | null }>;
+  /** Restart the WhatsApp socket so a new QR is produced (CLI `wacon login`). */
+  relogin(): Promise<{ state: ConnectionState }>;
   listChats(limit?: number): Promise<unknown[]>;
   readMessages(chat: string, limit?: number, beforeTs?: number): Promise<MessageRow[]>;
   searchMessages(query: string, chat?: string, limit?: number): Promise<(MessageRow & { snippet: string })[]>;
@@ -125,6 +127,7 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
   return {
     status: async () => service.status(),
     qr: async () => service.qr(),
+    relogin: () => service.relogin(),
     listChats: async (limit) => service.listChats(limit),
     readMessages: async (chat, limit, beforeTs) => service.readMessages(chat, limit, beforeTs),
     searchMessages: async (query, chat, limit) => service.searchMessages(query, chat, limit),

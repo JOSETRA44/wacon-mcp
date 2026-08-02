@@ -32,6 +32,11 @@ export class DaemonClient implements WaconApi {
   qr(): ReturnType<WaconApi["qr"]> {
     return this.rpc("qr");
   }
+  relogin(): ReturnType<WaconApi["relogin"]> {
+    // Tears down a socket and hands Baileys a fresh handshake — slower than a
+    // plain getter, but bounded well under the default timeout.
+    return this.rpc("relogin", [], 45_000);
+  }
   listChats(limit?: number): ReturnType<WaconApi["listChats"]> {
     return this.rpc("listChats", [limit]);
   }

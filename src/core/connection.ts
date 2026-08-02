@@ -13,7 +13,8 @@ import makeWASocket, {
   type WAPresence,
 } from "@whiskeysockets/baileys";
 import { EventEmitter } from "node:events";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
 import pino from "pino";
 import { AUTH_DIR, ensureDirs } from "./paths.js";
 import type { Store, MessageRow, MediaRow } from "./store.js";
@@ -112,6 +113,12 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
   private socket: WASocket | null = null;
   private stopped = false;
   private reconnectAttempts = 0;
+  /**
+   * Bumped on every start(). Ending a socket makes it emit a late `close`,
+   * which would otherwise let a dead socket overwrite the state of the live
+   * one it was just replaced by (relogin's QR turning back into "disconnected").
+   */
+  private generation = 0;
 
   state: ConnectionState = "disconnected";
   latestQr: string | null = null;
@@ -134,6 +141,7 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
   async start(): Promise<void> {
     ensureDirs();
     this.stopped = false;
+    const generation = ++this.generation;
     this.setState("connecting");
 
     const logger = pino({ level: "silent" });
@@ -156,6 +164,7 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
     socket.ev.on("creds.update", saveCreds);
 
     socket.ev.on("connection.update", (update) => {
+      if (generation !== this.generation) return; // superseded socket, ignore
       const { connection, lastDisconnect, qr } = update;
       if (qr) {
         this.latestQr = qr;
@@ -512,6 +521,45 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
       throw new Error(`Not connected to WhatsApp (state: ${this.state}).`);
     }
     return this.socket.groupMetadata(groupJid);
+  }
+
+  /**
+   * Force a fresh link attempt so a new QR is emitted.
+   *
+   * `start()` runs exactly once per daemon (at boot), and `logged_out` is a
+   * terminal state — no reconnect timer is armed for it. Without this, a
+   * daemon that lost its session can never produce another QR, and `wacon
+   * login` polls a socket that will never speak again until the process is
+   * killed by hand.
+   *
+   * Credentials are wiped only when the session is genuinely gone
+   * (`logged_out`, or an auth dir with no creds.json — the shape a failed
+   * write like ENOSPC leaves behind). A merely `connecting`/`disconnected`
+   * socket is a transient network problem, and deleting good creds there
+   * would turn a hiccup into a re-link.
+   */
+  async relogin(): Promise<ConnectionState> {
+    if (this.state === "connected") return this.state;
+
+    const sessionIsGone = this.state === "logged_out" || !existsSync(join(AUTH_DIR, "creds.json"));
+
+    this.stopped = true;
+    try {
+      this.socket?.end(undefined);
+    } catch {
+      // socket may already be dead — we only care that it stops emitting
+    }
+    this.socket = null;
+    this.latestQr = null;
+    this.reconnectAttempts = 0;
+
+    if (sessionIsGone) {
+      rmSync(AUTH_DIR, { recursive: true, force: true });
+      ensureDirs();
+    }
+
+    await this.start();
+    return this.state;
   }
 
   async logout(): Promise<void> {

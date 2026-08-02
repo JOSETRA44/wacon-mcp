@@ -465,6 +465,11 @@ export class WaconService {
     await this.connection.logout();
   }
 
+  /** Restart the WhatsApp socket so a fresh QR is emitted. See relogin(). */
+  async relogin(): Promise<{ state: ConnectionState }> {
+    return { state: await this.connection.relogin() };
+  }
+
   // ── memory ───────────────────────────────────────────────
 
   /**
