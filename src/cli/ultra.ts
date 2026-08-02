@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { tmpdir, homedir } from "node:os";
 import type { DaemonClient } from "../daemon/client.js";
 import { shortTime, resolveTarget, mediaKindOf, openWithSystemViewer, type ChatTarget } from "./chat-core.js";
 
@@ -34,12 +34,17 @@ type BlessedWidget = {
   show: () => void;
   selected?: number;
 };
+type BlessedFileManager = BlessedWidget & {
+  refresh: (cb?: (err: unknown) => void) => void;
+  destroy: () => void;
+};
 type Blessed = {
   screen: (opts: Record<string, unknown>) => BlessedWidget & { render: () => void; destroy: () => void; append: (w: unknown) => void; key: (k: string[], cb: () => void) => void; readonly focused: unknown };
   box: (opts: Record<string, unknown>) => BlessedWidget;
   list: (opts: Record<string, unknown>) => BlessedWidget;
   log: (opts: Record<string, unknown>) => BlessedWidget;
   textbox: (opts: Record<string, unknown>) => BlessedWidget;
+  filemanager: (opts: Record<string, unknown>) => BlessedFileManager;
 };
 
 interface ChatRow {
@@ -302,6 +307,14 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
     convo.setContent("");
     const msgs = await client.readMessages(t.jid, 30);
     for (const m of msgs.slice().reverse()) renderLine(m);
+    if (!tipShown) {
+      const tip = nextTip(ULTRA_TIPS);
+      if (tip) {
+        convo.log(`{cyan-fg}💡{/} {gray-fg}${tip}{/}`);
+        lastSpeaker = null;
+        tipShown = true;
+      }
+    }
     convo.setScrollPerc(100);
     await client.markRead(t.jid).catch(() => undefined);
     const row = rows.find((r) => r.jid === t.jid);
@@ -336,6 +349,7 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
             const row = rows.find((x) => x.jid === e.chat);
             if (row) row.lastTs = Date.now();
           } else {
+            showToast(friendlyName(e.chat, e.chatName), e.text ?? "(archivo)");
             // Bump the sender to the top of the list (real recency, matching
             // how the list is sorted) with an unread badge.
             const row = rows.find((x) => x.jid === e.chat);
@@ -344,7 +358,7 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
               row.lastTs = Date.now();
               rows = [row, ...rows.filter((x) => x.jid !== row.jid)];
             } else {
-              rows.unshift({ jid: e.chat, name: e.chatName ?? e.chat, unread: 1, lastTs: Date.now(), preview: e.text ?? "" });
+              rows.unshift({ jid: e.chat, name: friendlyName(e.chat, e.chatName), unread: 1, lastTs: Date.now(), preview: e.text ?? "" });
             }
             filtered = rows;
             renderList();
@@ -515,14 +529,69 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
       screen.render();
     });
   };
+  /**
+   * Browse for a file instead of demanding a typed absolute path — the old
+   * flow required knowing and retyping a full path, which nobody does. Starts
+   * in the last folder used (most people send several files from the same
+   * place), falls back to home. Ctrl+G still allows typing/pasting a path,
+   * which is what you want for a path copied from the file explorer.
+   */
+  let lastBrowseDir = homedir();
+  const pickFile = (): Promise<string | null> =>
+    new Promise((resolve) => {
+      const fm = blessed.filemanager({
+        parent: screen,
+        label: " Elegir archivo · Enter abre · Ctrl+G escribir ruta · Esc cancela ",
+        top: "center",
+        left: "center",
+        width: "70%",
+        height: "70%",
+        border: { type: "line" },
+        keys: true,
+        vi: true,
+        mouse: true,
+        scrollbar: { ch: " ", style: { bg: "gray" } },
+        cwd: lastBrowseDir,
+        style: { selected: { bg: "green", fg: "black" }, border: { fg: "cyan" } },
+      });
+      // Only re-arm the input when the user cancels. When a file WAS picked a
+      // caption prompt follows immediately, and that prompt re-arms the input
+      // itself on close — arming it here too would hand focus back and forth
+      // in the same tick and leave cursor artifacts.
+      const close = (result: string | null) => {
+        fm.destroy();
+        if (result === null && target) armInput();
+        screen.render();
+        resolve(result);
+      };
+      fm.on("file", (file: unknown) => {
+        const p = String(file);
+        lastBrowseDir = dirname(p);
+        close(p);
+      });
+      fm.key(["escape", "q"], () => close(null));
+      // Escape hatch: a path copied from the OS file explorer is faster to
+      // paste than to navigate to.
+      fm.key(["C-g"], () => {
+        fm.destroy();
+        screen.render();
+        void prompt("pega o escribe la ruta del archivo").then((p) => resolve(p ? unquotePath(p) : null));
+      });
+      fm.focus();
+      fm.refresh();
+      screen.render();
+    });
+
   const attachFile = () => {
     if (!target) return;
-    void prompt("ruta del archivo a enviar").then(async (path) => {
+    void pickFile().then(async (path) => {
       if (!path) return;
-      const r = await client.sendFile(target!.jid, path, { clientName: "cli-ultra" });
+      const caption = await prompt("comentario (opcional, Enter para omitir)");
+      const r = await client.sendFile(target!.jid, path, { clientName: "cli-ultra", caption: caption ?? undefined });
       if ("guidance" in r) convo.log(`{yellow-fg}✖ ${r.guidance}{/}`);
-      else if (r.sent) renderLine({ from_me: 1, text: `[${r.kind}: ${r.fileName}]`, timestamp: Date.now() });
+      else if (r.sent) renderLine({ from_me: 1, text: `[${r.kind}: ${r.fileName}]${caption ? ` ${caption}` : ""}`, timestamp: Date.now() });
       else convo.log(`{yellow-fg}✖ no enviado: ${r.reason ?? "bloqueado"}{/}`);
+      convo.setScrollPerc(100);
       screen.render();
     });
   };
@@ -618,6 +687,30 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
   else {
     chatList.focus();
     chatList.select(0);
+  }
+
+  // First run ever: teach the three things you cannot guess (how to open a
+  // chat, how to switch, how to attach). Shown once and never again — a
+  // returning user gets straight to their chats.
+  const WELCOME_ID = "ultra-welcome";
+  if (!hasSeen(WELCOME_ID)) {
+    markSeen(WELCOME_ID);
+    showOverlay(
+      "Bienvenido a Wacon",
+      "{bold}Esto es WhatsApp dentro de tu terminal.{/}\n\n" +
+        "Tres cosas y ya sabes usarlo:\n\n" +
+        "  {cyan-fg}1.{/} A la izquierda están tus chats, ordenados por\n" +
+        "     el más reciente. Muévete con {bold}↑↓{/} y abre con {bold}Enter{/}.\n\n" +
+        "  {cyan-fg}2.{/} Escribe abajo y pulsa {bold}Enter{/} para enviar.\n" +
+        "     Para cambiar de chat sin dejar de escribir: {bold}Ctrl+N{/}\n" +
+        "     (siguiente) y {bold}Ctrl+P{/} (anterior).\n\n" +
+        "  {cyan-fg}3.{/} {bold}Ctrl+O{/} adjunta un archivo (se abre un explorador,\n" +
+        "     no hace falta escribir rutas).\n\n" +
+        "En cualquier momento, {bold}?{/} muestra todos los atajos\n" +
+        "y {bold}Ctrl+C{/} sale.\n\n" +
+        "  {gray-fg}(Enter para empezar){/}",
+      22
+    );
   }
   screen.render();
 
