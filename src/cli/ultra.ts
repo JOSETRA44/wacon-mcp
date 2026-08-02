@@ -2,7 +2,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import type { DaemonClient } from "../daemon/client.js";
-import { shortTime, resolveTarget, mediaKindOf, openWithSystemViewer, type ChatTarget } from "./chat-core.js";
+import { shortTime, resolveTarget, mediaKindOf, openWithSystemViewer, friendlyName, unquotePath, type ChatTarget } from "./chat-core.js";
+import { nextTip, hasSeen, markSeen, ULTRA_TIPS } from "./tips.js";
 
 /**
  * `wacon chat ultra` — the full-screen WhatsApp-Web-style app.
@@ -141,6 +142,21 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
     style: { bg: "black" },
   });
 
+  // Transient banner for messages that land in a chat you're NOT reading.
+  // Without it those arrivals were silent (only a badge in a list you may
+  // not be looking at), so you'd miss someone writing to you.
+  const toast = blessed.box({
+    parent: screen,
+    bottom: 4,
+    right: 1,
+    width: "40%",
+    height: 3,
+    border: { type: "line" },
+    tags: true,
+    hidden: true,
+    style: { border: { fg: "yellow" }, bg: "black" },
+  });
+
   // ── state ────────────────────────────────────────────────
   let rows: ChatRow[] = [];
   let filtered: ChatRow[] = [];
@@ -207,13 +223,13 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
     ]);
     const byJid = new Map<string, ChatRow>();
     for (const c of chats as { jid: string; display_name: string | null; last_message_ts: number | null }[]) {
-      byJid.set(c.jid, { jid: c.jid, name: c.display_name ?? c.jid, unread: 0, lastTs: c.last_message_ts ?? 0, preview: "" });
+      byJid.set(c.jid, { jid: c.jid, name: friendlyName(c.jid, c.display_name), unread: 0, lastTs: c.last_message_ts ?? 0, preview: "" });
     }
     for (const p of inbox as { chat: string; name: string | null; unansweredCount: number; lastMessage: string | null; lastTimestamp: number }[]) {
       const prev = byJid.get(p.chat);
       byJid.set(p.chat, {
         jid: p.chat,
-        name: p.name ?? prev?.name ?? p.chat,
+        name: friendlyName(p.chat, p.name ?? prev?.name),
         unread: p.unansweredCount,
         lastTs: p.lastTimestamp || prev?.lastTs || 0,
         preview: p.lastMessage ?? prev?.preview ?? "",
