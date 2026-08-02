@@ -65,6 +65,7 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "confirmSuggestedEvent",
   "dismissSuggestedEvent",
   "readReceiptsMode",
+  "contactPresence",
   "inbox",
   "commitments",
   "briefing",

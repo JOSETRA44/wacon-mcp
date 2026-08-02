@@ -204,6 +204,13 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
         this.captureAltMapping(msg);
         const row = this.toRow(msg);
         if (!row) continue;
+        // History-synced messages carry pushName too, same as live ones —
+        // without this, every sender who was never messaged live (which is
+        // most of a freshly-synced account) never gets a name captured, and
+        // shows as a bare jid/number forever.
+        if (msg.pushName && row.sender_jid && !row.from_me) {
+          this.store.upsertContact({ jid: row.sender_jid, notifyName: msg.pushName });
+        }
         const { stub } = extractMedia(msg);
         if (stub) this.store.upsertMedia({ chat_jid: row.chat_jid, msg_id: row.id, timestamp: row.timestamp, ...stub });
       }
@@ -229,6 +236,20 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
 
     socket.ev.on("contacts.upsert", (contacts) => {
       for (const contact of contacts) this.linkContact(contact);
+    });
+
+    // Presence arrives per participant: in a 1:1 the key is the contact, in a
+    // group it's whichever member's state changed. Storing by participant
+    // (not by chat) is what makes group-member presence work too.
+    socket.ev.on("presence.update", ({ presences }) => {
+      for (const [participant, data] of Object.entries(presences ?? {})) {
+        if (!data?.lastKnownPresence) continue;
+        this.store.upsertPresence({
+          jid: participant,
+          state: data.lastKnownPresence,
+          lastSeen: data.lastSeen ? toMillis(data.lastSeen) : null,
+        });
+      }
     });
 
     socket.ev.on("messages.upsert", ({ messages }) => {
@@ -446,6 +467,32 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
   }
 
   presence: WAPresence = "unavailable";
+
+  /**
+   * Ask WhatsApp to start streaming someone's online/last-seen state. Presence
+   * is push-only: without subscribing, no `presence.update` ever arrives for
+   * that contact. The reply comes asynchronously through the event handler,
+   * so callers subscribe and then wait.
+   */
+  async subscribePresence(jid: string): Promise<void> {
+    await this.requireSocket().presenceSubscribe(jid);
+  }
+
+  /**
+   * Whether the ACCOUNT is allowed to see other people's last seen / online.
+   * WhatsApp enforces reciprocity: hide yours and you lose the ability to see
+   * anyone else's. Reporting this is what keeps "no aparece" from looking like
+   * a bug in Wacon when it is really a privacy setting.
+   */
+  async presencePrivacy(): Promise<{ lastSeen: string | null; online: string | null; canSeeOthers: boolean }> {
+    try {
+      const s = (await this.requireSocket().fetchPrivacySettings()) as Record<string, string | undefined>;
+      const lastSeen = s?.last ?? null;
+      return { lastSeen, online: s?.online ?? null, canSeeOthers: lastSeen !== "none" };
+    } catch {
+      return { lastSeen: null, online: null, canSeeOthers: true };
+    }
+  }
 
   /** Explicit blue ticks. Reading via Wacon does NOT mark as read unless asked. */
   async markRead(chatJid: string, messages: { id: string; participant?: string | null }[]): Promise<void> {

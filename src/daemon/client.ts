@@ -194,6 +194,10 @@ export class DaemonClient implements WaconApi {
   readReceiptsMode(): ReturnType<WaconApi["readReceiptsMode"]> {
     return this.rpc("readReceiptsMode", [], 20_000);
   }
+  contactPresence(chat: string, waitSeconds?: number): ReturnType<WaconApi["contactPresence"]> {
+    // Server-side wait is capped at 15s; allow room for it plus transport.
+    return this.rpc("contactPresence", [chat, waitSeconds], 30_000);
+  }
   inbox(limit?: number, includeGroups?: boolean): ReturnType<WaconApi["inbox"]> {
     return this.rpc("inbox", [limit, includeGroups]);
   }

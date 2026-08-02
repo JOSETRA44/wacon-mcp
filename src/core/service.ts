@@ -23,6 +23,17 @@ import { prepareMedia, toMessageContent } from "../media/send-media.js";
 import { importPack, indexOwnStickers, stickerAffinity, MOODS } from "../media/stickers.js";
 import type { FactRow, EventRow, TaskRow, ErrorRow } from "./store.js";
 
+/** "hace 5 min" — humans read a distance in time far faster than a timestamp. */
+function relativeTime(ts: number): string {
+  const mins = Math.max(0, Math.round((Date.now() - ts) / 60000));
+  if (mins < 1) return "hace un momento";
+  if (mins < 60) return `hace ${mins} min`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `hace ${hours} h`;
+  const days = Math.round(hours / 24);
+  return days === 1 ? "ayer" : `hace ${days} días`;
+}
+
 export interface StatusInfo {
   state: ConnectionState;
   selfJid: string | null;
@@ -356,6 +367,87 @@ export class WaconService {
 
   readReceiptsMode(): Promise<"on" | "off" | "unknown"> {
     return this.connection.readReceiptsMode();
+  }
+
+  /**
+   * Online / last-seen state for one contact.
+   *
+   * This is genuinely unreliable data and the shape says so rather than
+   * pretending otherwise. Three independent reasons it can be unknown:
+   *  1. The contact hides last seen / online (their privacy setting).
+   *  2. WhatsApp's reciprocity rule — if the USER hides their own last seen,
+   *     they cannot see anyone else's, no matter the contact's setting.
+   *  3. Presence is push-only: nothing arrives until we subscribe, and the
+   *     contact's phone may simply not report anything right now.
+   * Callers get `status` plus a human explanation so nobody reads "unknown"
+   * as "offline" — those mean very different things.
+   */
+  async contactPresence(
+    chatJidOrPhone: string,
+    waitSeconds = 3
+  ): Promise<{
+    chat: string;
+    name: string | null;
+    status: "online" | "typing" | "recording" | "offline" | "unknown";
+    lastSeen: string | null;
+    lastSeenRelative: string | null;
+    observedAt: string | null;
+    privacy: { yourLastSeen: string | null; canSeeOthers: boolean };
+    note: string;
+  }> {
+    const chatJid = this.resolveChatJid(chatJidOrPhone);
+    const name = this.store.resolveDisplayName(chatJid);
+    const privacy = await this.connection.presencePrivacy();
+
+    if (chatJid.endsWith("@g.us")) {
+      return {
+        chat: chatJid, name, status: "unknown", lastSeen: null, lastSeenRelative: null, observedAt: null,
+        privacy: { yourLastSeen: privacy.lastSeen, canSeeOthers: privacy.canSeeOthers },
+        note: "Los grupos no tienen estado de conexión; consulta a un miembro concreto.",
+      };
+    }
+
+    try {
+      await this.connection.subscribePresence(chatJid);
+      // Presence is pushed asynchronously — poll our own store briefly rather
+      // than racing the event, which may already have landed.
+      const deadline = Date.now() + Math.min(Math.max(waitSeconds, 0), 15) * 1000;
+      const before = this.store.getPresence(chatJid)?.updated_at ?? 0;
+      while (Date.now() < deadline) {
+        const now = this.store.getPresence(chatJid);
+        if (now && now.updated_at > before) break;
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    } catch {
+      // Subscribing can fail while reconnecting; fall through to cached data.
+    }
+
+    const row = this.store.getPresence(chatJid);
+    const status =
+      row?.state === "available" ? "online"
+      : row?.state === "composing" ? "typing"
+      : row?.state === "recording" ? "recording"
+      : row?.state === "unavailable" || row?.state === "paused" ? "offline"
+      : "unknown";
+
+    const note = !privacy.canSeeOthers
+      ? "No puedes ver el estado de nadie porque tienes tu propia 'hora de última vez' oculta — WhatsApp lo exige recíprocamente."
+      : status === "unknown"
+        ? "WhatsApp no informó nada: probablemente esta persona oculta su conexión, o no ha estado activa desde que Wacon está conectado."
+        : row?.last_seen
+          ? "Dato reportado por WhatsApp; puede quedar desactualizado si la persona oculta su última vez."
+          : "En línea/desconectado sí se informa, pero esta persona no comparte la hora exacta de su última vez.";
+
+    return {
+      chat: chatJid,
+      name,
+      status,
+      lastSeen: row?.last_seen ? new Date(row.last_seen).toISOString() : null,
+      lastSeenRelative: row?.last_seen ? relativeTime(row.last_seen) : null,
+      observedAt: row ? new Date(row.updated_at).toISOString() : null,
+      privacy: { yourLastSeen: privacy.lastSeen, canSeeOthers: privacy.canSeeOthers },
+      note,
+    };
   }
 
   async markRead(chatJidOrPhone: string, limit = 20): Promise<{ marked: number }> {

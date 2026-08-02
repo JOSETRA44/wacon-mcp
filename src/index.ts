@@ -270,6 +270,34 @@ program
   });
 
 program
+  // Deliberately NOT called "presence": that command already exists and sets
+  // the USER's own visibility. This one reads someone else's.
+  .command("online <chat>")
+  .alias("seen")
+  .description("Is a contact online, and when were they last seen")
+  .option("-w, --wait <n>", "seconds to wait for WhatsApp to answer", "3")
+  .action(async (chat: string, opts: { wait: string }) => {
+    try {
+      const p = await client.contactPresence(chat, Number(opts.wait));
+      emit(p, () => {
+        const label =
+          p.status === "online" ? pc.green("● en línea")
+          : p.status === "typing" ? pc.cyan("✎ escribiendo…")
+          : p.status === "recording" ? pc.cyan("🎤 grabando audio…")
+          : p.status === "offline" ? pc.dim("○ desconectado")
+          : pc.yellow("? sin información");
+        console.log(`\n${pc.bold(p.name ?? p.chat)}  ${label}`);
+        if (p.lastSeenRelative) console.log(pc.dim(`  última vez: ${p.lastSeenRelative}`));
+        // The note explains WHY it is unknown — without it "sin información"
+        // reads as "offline", which is a materially different thing.
+        console.log(pc.dim(`  ${p.note}\n`));
+      });
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
   .command("digest")
   .description("Compact catch-up: what arrived per chat")
   .option("-m, --minutes <n>", "look back this many minutes", "60")
@@ -307,7 +335,7 @@ program
 
 program
   .command("presence <mode>")
-  .description("Appear online or stealth: available | unavailable")
+  .description("YOUR own visibility: available | unavailable (to read someone else's, use `wacon online <chat>`)")
   .action(async (mode: string) => {
     try {
       if (!["available", "unavailable"].includes(mode)) die("mode must be 'available' or 'unavailable'");

@@ -97,6 +97,16 @@ export interface WaconApi {
   confirmSuggestedEvent(id: number, notifyBeforeMinutes?: number): Promise<{ confirmed: boolean; eventId?: number }>;
   dismissSuggestedEvent(id: number): Promise<{ dismissed: boolean }>;
   readReceiptsMode(): Promise<"on" | "off" | "unknown">;
+  contactPresence(chat: string, waitSeconds?: number): Promise<{
+    chat: string;
+    name: string | null;
+    status: "online" | "typing" | "recording" | "offline" | "unknown";
+    lastSeen: string | null;
+    lastSeenRelative: string | null;
+    observedAt: string | null;
+    privacy: { yourLastSeen: string | null; canSeeOthers: boolean };
+    note: string;
+  }>;
   inbox(limit?: number, includeGroups?: boolean): Promise<unknown[]>;
   commitments(sinceDays?: number): Promise<unknown[]>;
   briefing(sinceMinutes?: number): Promise<unknown>;
@@ -168,6 +178,7 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
     confirmSuggestedEvent: async (id, notifyBeforeMinutes) => service.confirmSuggestedEvent(id, notifyBeforeMinutes),
     dismissSuggestedEvent: async (id) => service.dismissSuggestedEvent(id),
     readReceiptsMode: () => service.readReceiptsMode(),
+    contactPresence: (chat, waitSeconds) => service.contactPresence(chat, waitSeconds),
     inbox: async (limit, includeGroups) => service.inbox(limit, includeGroups),
     commitments: async (sinceDays) => service.commitments(sinceDays),
     briefing: async (sinceMinutes) => service.briefing(sinceMinutes),

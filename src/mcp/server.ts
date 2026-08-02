@@ -736,6 +736,20 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
   );
 
   server.registerTool(
+    "get_presence",
+    {
+      title: "Is this contact online / when were they last seen",
+      description:
+        "Online, typing, or last-seen state for ONE contact, straight from WhatsApp. Use for '¿está en línea?', '¿cuándo se conectó por última vez?', or to decide whether to expect a fast reply. IMPORTANT — this data is often legitimately unavailable and 'unknown' does NOT mean offline: the contact may hide their presence, or the USER may hide their own last seen (WhatsApp enforces reciprocity and then shows you nobody's). Always read the returned `note` and tell the user WHY it is unknown instead of asserting they are offline. Groups have no presence.",
+      inputSchema: {
+        chat: z.string().describe("Contact name, phone number, or JID"),
+        wait_seconds: z.number().int().min(0).max(15).default(3).describe("How long to wait for WhatsApp to push the state"),
+      },
+    },
+    async ({ chat, wait_seconds }) => json(await api.contactPresence(chat, wait_seconds))
+  );
+
+  server.registerTool(
     "get_commitments",
     {
       title: "Promises the user made and may not have kept",
