@@ -30,6 +30,22 @@ export const CHAT_TIPS: Tip[] = [
   { id: "resume", text: `Al reabrir ${c.bold("wacon chat")}, pulsa enter para continuar donde lo dejaste.` },
 ];
 
+/**
+ * Same idea for `chat ultra`, separate pool: the keys are entirely different
+ * (Ctrl+N/Ctrl+K instead of slash commands) and this text is rendered inside
+ * blessed's own `{tag}` widgets, not printed to a raw ANSI terminal — so it
+ * must stay plain, no `c.bold`/`c.dim` (those emit real ANSI escapes, which
+ * blessed would show as literal garbage instead of formatting).
+ */
+export const ULTRA_TIPS: Tip[] = [
+  { id: "ultra-switch", text: "Ctrl+N / Ctrl+P cambian de chat sin salir de lo que estás escribiendo." },
+  { id: "ultra-jump", text: "Ctrl+K busca y salta a cualquier chat al vuelo." },
+  { id: "ultra-list", text: "Esc o Tab te llevan a la lista, justo donde te quedaste." },
+  { id: "ultra-attach", text: "Ctrl+O abre un explorador para adjuntar archivos (no hace falta escribir rutas); Ctrl+S manda un sticker." },
+  { id: "ultra-media", text: "Enter sobre la conversación abre la última imagen o audio recibido." },
+  { id: "ultra-help", text: "? o F1 muestran todos los atajos cuando los necesites." },
+];
+
 function loadSeen(): Set<string> {
   try {
     return new Set(JSON.parse(readFileSync(TIPS_FILE, "utf8")) as string[]);
@@ -57,6 +73,21 @@ export function nextTip(pool: Tip[] = CHAT_TIPS): string | null {
   seen.add(tip.id);
   saveSeen(seen);
   return tip.text;
+}
+
+/**
+ * One-shot markers that share the tips storage. Used for things shown once
+ * ever rather than once per session — the ultra welcome screen, for example,
+ * should greet a newcomer and then never interrupt again.
+ */
+export function hasSeen(id: string): boolean {
+  return loadSeen().has(id);
+}
+
+export function markSeen(id: string): void {
+  const seen = loadSeen();
+  seen.add(id);
+  saveSeen(seen);
 }
 
 /** Force a specific tip (e.g. right after the user fumbles a command). */
