@@ -97,10 +97,37 @@ Ambos son **pura presentación** sobre el mismo `DaemonClient` — cero lógica 
 ```
 
 - **Panel izquierdo**: lista de chats ordenada por **recencia real** (igual que WhatsApp Web — el chat con el mensaje más nuevo va arriba), con badge de no leídos y el activo resaltado. El no-leído es una insignia, no un criterio de orden. Los mensajes que llegan de otros chats **suben ese chat arriba**.
-- **Panel derecho**: conversación con scroll nativo y feed en vivo (mismo long-poll `waitForMessages`), con divisores de día y mensajes agrupados por turno de quien habla.
+- **Panel derecho**: conversación con scroll nativo y feed en vivo (mismo long-poll `waitForMessages`), con divisores de día, mensajes agrupados por turno de quien habla, y un divisor **`── nuevos mensajes ──`** que marca dónde te quedaste al empezar a leer.
+- **Mensajes de otros chats**: aparece un aviso temporal (6 s) abajo a la derecha — `💬 Brandon / hola` — además de subir ese chat arriba con su badge. Antes llegaban en silencio y te los perdías.
 - **Teclas**: `Ctrl+N`/`Ctrl+P` chat siguiente/anterior (funcionan **incluso escribiendo un mensaje** — es la forma rápida de cambiar de chat) · `Ctrl+K` buscar/saltar a un chat (también funciona escribiendo) · `Esc`/`Tab` ir a la lista (recuerda dónde estabas) · `↑↓` mover en la lista · `Enter` abrir/enviar/ver media · `/` buscar chat (solo desde la lista, para no chocar con un "/" escrito en un mensaje) · `Ctrl+F` buscar en la conversación · `Ctrl+O` adjuntar archivo · `Ctrl+S` sticker · `?`/`F1` ayuda · `Ctrl+C` sale siempre (incluso escribiendo) y **restaura la terminal**.
 
 **Motor**: `neo-blessed` (JS puro, sin binarios nativos), **cargado perezosamente** con `await import()` solo al entrar a este modo — los agentes y el resto de comandos no lo cargan nunca (verificado: `wacon inbox --json` sigue sin ANSI y sin tocar blessed). Sin TTY o sin la dependencia, degrada con un mensaje claro que remite a `wacon chat`.
+
+**En grupos, el remitente sí se distingue.** Cada línea muestra a la persona real que escribió (no el nombre del grupo), con el nombre alineado a una columna fija — así el texto del mensaje siempre empieza en la misma posición y no se ve "en zigzag" con nombres de distinto largo. Además **cada participante tiene su propio color**, estable entre sesiones (derivado de su identificador), así que en un grupo movido se distingue quién habla de un vistazo. Verificado contra grupos reales: 0 participantes mostrando un número en lugar de su nombre.
+
+## Adjuntar archivos: explorador, no rutas a mano
+
+`Ctrl+O` abre un **explorador de archivos real** (widget `filemanager` de blessed) — navegas con `↑↓`, entras a carpetas con `Enter`, y al elegir un archivo se pide un comentario opcional. Recuerda la última carpeta usada, porque normalmente mandas varios archivos del mismo sitio.
+
+Antes había que **saber y teclear la ruta absoluta completa**, que en la práctica nadie hace. Si prefieres pegarla (por ejemplo copiada del explorador de Windows), `Ctrl+G` dentro del explorador abre el campo de texto — y `unquotePath()` quita las comillas que Windows añade con "Copiar como ruta", que si no producían un "archivo no encontrado" desconcertante.
+
+## Primera vez: te enseña a usarlo
+
+La primera vez que abres el modo ultra aparece una bienvenida con **las tres cosas que no se pueden adivinar** (abrir un chat, cambiar de chat sin dejar de escribir, adjuntar). Se muestra una sola vez en la vida; a partir de ahí entras directo a tus chats, y `?` sigue estando ahí cuando lo necesites.
+
+`Ctrl+C` es la única forma de salir: una `q` suelta cerraría la app entera mientras solo estabas mirando la lista, demasiado fácil de pulsar sin querer.
+
+**Tips silenciosos.** La primera vez que abres un chat, si te queda algún tip por ver (mismo sistema que [[CLI-y-Terminal|`wacon chat`]], pool separado con los atajos propios del modo ultra), aparece como una línea `💡` dentro del historial — no una ventana emergente. Uno por sesión, nunca se repite.
+
+## Nombres, no números
+
+Ningún cliente (ni el ligero ni ultra) muestra nunca un jid en crudo. `friendlyName()` (`src/cli/chat-core.js`) decide qué enseñar cuando no hay nombre guardado:
+
+- Un número de teléfono sin nombre se formatea como lo haría WhatsApp: `+51 987 654 321`, no `51987654321@s.whatsapp.net`.
+- Un `@lid` (el id interno de privacidad de WhatsApp — **no es un número de teléfono**, mostrarlo en crudo es puro ruido) sin nombre resuelto dice honestamente **"Contacto sin nombre"**.
+- Un grupo sin nombre dice **"Grupo sin nombre"**.
+
+Pero la causa de fondo de "los nombres salen como números" era otra: `listChats`, `groupMembers` y la bandeja (`pendingReplies`) buscaban el nombre solo por coincidencia exacta de jid, sin cruzar la tabla `jid_map` — así que un contacto guardado bajo su número de teléfono no aparecía si la conversación (o, en grupos, el participante) vivía bajo su `@lid`, que es el caso más común dentro de grupos, donde WhatsApp oculta los números reales. Las tres consultas ahora cruzan ambos lados del par `@lid`↔teléfono antes de rendirse. Además, la sincronización de historial no capturaba el `pushName` de cada mensaje (solo los mensajes en vivo lo hacían) — corregido para que las cuentas recién sincronizadas también acumulen nombres con el tiempo.
 
 ## Descubribilidad: que se aprenda usándolo
 
@@ -141,6 +168,32 @@ Cuatro problemas concretos que tenía y cómo se arreglaron:
 | Cambiar de chat exigía comandos exactos | **`/1`…`/9`** salta al chat que te avisó; `/switch` acepta nombres parciales |
 | Al salir perdías dónde estabas | Se recuerda el último chat: **enter** en el selector lo retoma |
 | No había autocompletado | **Tab** completa comandos y nombres de contactos |
+
+## ¿Está en línea? Última vez
+
+```bash
+wacon online nayda          # alias: wacon seen nayda
+wacon online nayda --json   # para agentes
+```
+
+```
+Nayda Quispe UTP  ● en línea
+  última vez: hace 5 min
+```
+
+WhatsApp **empuja** la presencia: no llega nada hasta que te suscribes a esa persona (`presenceSubscribe`), y la respuesta viene por evento. Wacon se suscribe, espera unos segundos y guarda lo último conocido en la tabla `presence` — así tras un reinicio todavía puede decirte algo, siempre indicando **cuándo** lo observó.
+
+> [!warning] Este dato falta legítimamente muchas veces
+> `sin información` **no significa "desconectado"**. Hay tres motivos distintos:
+> 1. Esa persona oculta su conexión / hora de última vez.
+> 2. **Reciprocidad**: si *tú* ocultas tu última vez, WhatsApp no te deja ver la de nadie.
+> 3. Nadie ha reportado nada desde que Wacon está conectado.
+>
+> Por eso la respuesta incluye un campo `note` que explica **por qué** no se sabe, y la tool MCP `get_presence` le exige al agente leerlo antes de afirmar que alguien está desconectado.
+
+Los grupos no tienen estado de conexión: se responde explicándolo, en vez de devolver un `unknown` mudo.
+
+No confundir con `wacon presence <mode>`, que controla **tu propia** visibilidad (`available` / `unavailable`, el modo sigilo).
 
 ## Tics azules: se resuelven solos
 

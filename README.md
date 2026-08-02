@@ -136,7 +136,18 @@ wacon chat nayda      # abre una directamente
 wacon chat ultra      # app de pantalla completa (paneles, estilo WhatsApp Web)
 ```
 
-**Dos clientes, un motor.** `wacon chat` es el cliente ligero (cero dependencias, ideal por SSH o un vistazo rápido). **`wacon chat ultra`** (alias `wacon tui`) abre una app de terminal de pantalla completa: lista de chats a la izquierda, conversación a la derecha, búsqueda incremental con `/`, adjuntar con `Ctrl+O`, todo con teclas. Ambos son pura presentación sobre el mismo daemon — nada de lógica duplicada. La app usa `neo-blessed` cargado solo al entrar a ese modo, así que ni los agentes ni el resto de comandos pagan nada.
+**Dos clientes, un motor.** `wacon chat` es el cliente ligero (cero dependencias, ideal por SSH o un vistazo rápido). **`wacon chat ultra`** (alias `wacon tui`) abre una app de terminal de pantalla completa: lista de chats a la izquierda (ordenada por recencia, como WhatsApp Web), conversación a la derecha, y todo por teclas:
+
+| Tecla | Qué hace |
+|---|---|
+| `Ctrl+N` / `Ctrl+P` | Chat siguiente / anterior — **sin dejar de escribir** |
+| `Ctrl+K` | Buscar y saltar a un chat (también mientras escribes) |
+| `Esc` / `Tab` | Ir a la lista, justo donde te quedaste |
+| `Ctrl+O` | Adjuntar archivo — **abre un explorador**, no pide rutas |
+| `Ctrl+S` / `Ctrl+F` | Sticker / buscar en la conversación |
+| `?` | Todos los atajos · `Ctrl+C` sale |
+
+La primera vez te recibe una bienvenida que enseña lo esencial (una sola vez). En grupos cada participante tiene **su propio color y su nombre real**, y los mensajes que llegan de otros chats avisan con un aviso temporal en pantalla. Ambos clientes son pura presentación sobre el mismo daemon — nada de lógica duplicada. La app usa `neo-blessed` cargado solo al entrar a ese modo, así que ni los agentes ni el resto de comandos pagan nada.
 
 Cliente de chat en la terminal, sin abrir un navegador y **sin dependencias nuevas**. Los mensajes entrantes aparecen en vivo mientras escribes, manda "escribiendo…" como un cliente real, y el scroll y el copiar/pegar de tu terminal siguen funcionando.
 
