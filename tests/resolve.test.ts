@@ -56,6 +56,34 @@ describe("@lid ↔ phone resolution", () => {
     store.close();
   });
 
+  it("listChats resolves a name saved under the phone-number jid for an @lid chat", () => {
+    // Root cause of "names show as numbers": a chat lives under @lid but the
+    // saved contact name only exists under the phone-number jid (or vice
+    // versa) — listChats used to join contacts by exact jid match only.
+    const store = new Store(":memory:");
+    store.upsertContact({ jid: PN, name: "Nayda Quispe UTP" });
+    store.mapJids(LID, PN);
+    store.upsertChat({ jid: LID, lastMessageTs: Date.now() });
+    const chats = store.listChats(10);
+    expect(chats.find((c) => c.jid === LID)!.display_name).toBe("Nayda Quispe UTP");
+    store.close();
+  });
+
+  it("groupMembers resolves a member's name across the @lid/phone-number split", () => {
+    // Group participant jids are almost always @lid (WhatsApp hides phone
+    // numbers inside groups) even when that person is saved as a contact
+    // under their real phone number.
+    const store = new Store(":memory:");
+    const group = "120363@g.us";
+    store.upsertContact({ jid: PN, name: "Nayda Quispe UTP" });
+    store.mapJids(LID, PN);
+    for (let i = 0; i < 5; i++) store.insertMessage({ id: `g${i}`, chat_jid: group, sender_jid: LID, from_me: 0, timestamp: Date.now(), text: `msg ${i}`, message_type: "text", quoted_id: null });
+    const members = store.groupMembers(group, 1);
+    expect(members[0]!.sender_jid).toBe(LID);
+    expect(members[0]!.display_name).toBe("Nayda Quispe UTP");
+    store.close();
+  });
+
   it("analysisTargets ranks by outgoing and flags facts", () => {
     const store = new Store(":memory:");
     for (let i = 0; i < 20; i++) store.insertMessage(msg("a@s.whatsapp.net", 1, `m${i}`));

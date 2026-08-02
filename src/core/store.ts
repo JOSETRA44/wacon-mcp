@@ -332,6 +332,16 @@ CREATE TABLE IF NOT EXISTS jid_map (
   pn TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_jidmap_pn ON jid_map (pn);
+
+-- Online/last-seen state, as reported by WhatsApp. Cached because presence
+-- only arrives while subscribed: after a restart the last known value is
+-- better than nothing, as long as we always say HOW OLD it is.
+CREATE TABLE IF NOT EXISTS presence (
+  jid TEXT PRIMARY KEY,
+  state TEXT NOT NULL,
+  last_seen INTEGER,
+  updated_at INTEGER NOT NULL
+);
 `;
 
 /**
@@ -381,10 +391,17 @@ export class Store {
   }
 
   listChats(limit = 30): (ChatRow & { display_name: string | null })[] {
+    // A contact's name can live under either half of an @lid<->phone-number
+    // pair (WhatsApp's own privacy-jid split, see jid_map) — without this
+    // cross-reference, a chat stored under @lid shows blank/a bare number
+    // even when the same person's name is saved under their phone-number jid.
     return this.db
       .prepare(
-        `SELECT c.*, COALESCE(c.name, ct.name, ct.notify_name) AS display_name
-         FROM chats c LEFT JOIN contacts ct ON ct.jid = c.jid
+        `SELECT c.*, COALESCE(c.name, ct.name, ct.notify_name, ct2.name, ct2.notify_name) AS display_name
+         FROM chats c
+         LEFT JOIN contacts ct ON ct.jid = c.jid
+         LEFT JOIN jid_map jm ON jm.lid = c.jid OR jm.pn = c.jid
+         LEFT JOIN contacts ct2 ON ct2.jid = (CASE WHEN jm.lid = c.jid THEN jm.pn ELSE jm.lid END)
          ORDER BY c.last_message_ts DESC NULLS LAST
          LIMIT ?`
       )
@@ -779,7 +796,7 @@ export class Store {
            SELECT chat_jid, MAX(timestamp) last_ts FROM messages GROUP BY chat_jid
          )
          SELECT m.chat_jid,
-                COALESCE(c.name, ct.name, ct.notify_name) display_name,
+                COALESCE(c.name, ct.name, ct.notify_name, ct2.name, ct2.notify_name) display_name,
                 COALESCE(c.is_group, 0) is_group,
                 m.timestamp last_ts,
                 m.text last_text,
@@ -792,6 +809,8 @@ export class Store {
          JOIN last l ON l.chat_jid = m.chat_jid AND l.last_ts = m.timestamp
          LEFT JOIN chats c ON c.jid = m.chat_jid
          LEFT JOIN contacts ct ON ct.jid = m.chat_jid
+         LEFT JOIN jid_map jm ON jm.lid = m.chat_jid OR jm.pn = m.chat_jid
+         LEFT JOIN contacts ct2 ON ct2.jid = (CASE WHEN jm.lid = m.chat_jid THEN jm.pn ELSE jm.lid END)
          WHERE m.from_me = 0 ${groupFilter} ${conversational("m.chat_jid")}
          ORDER BY m.timestamp DESC LIMIT ?`
       )
@@ -815,12 +834,22 @@ export class Store {
       .all(since, limit) as ReturnType<Store["commitmentCandidates"]>;
   }
 
-  /** Participants of a group with how much each one talks — the unit of group profiling. */
+  /**
+   * Participants of a group with how much each one talks — the unit of group
+   * profiling. Group participant jids are almost always the @lid form
+   * (WhatsApp hides phone numbers inside groups), so the jid_map cross-
+   * reference matters even more here than in listChats: a member you have
+   * saved as a contact under their phone number would otherwise show as a
+   * bare number instead of their name.
+   */
   groupMembers(groupJid: string, minMessages = 20): { sender_jid: string; display_name: string | null; total: number }[] {
     return this.db
       .prepare(
-        `SELECT m.sender_jid, COALESCE(ct.name, ct.notify_name) display_name, COUNT(*) total
-         FROM messages m LEFT JOIN contacts ct ON ct.jid = m.sender_jid
+        `SELECT m.sender_jid, COALESCE(ct.name, ct.notify_name, ct2.name, ct2.notify_name) display_name, COUNT(*) total
+         FROM messages m
+         LEFT JOIN contacts ct ON ct.jid = m.sender_jid
+         LEFT JOIN jid_map jm ON jm.lid = m.sender_jid OR jm.pn = m.sender_jid
+         LEFT JOIN contacts ct2 ON ct2.jid = (CASE WHEN jm.lid = m.sender_jid THEN jm.pn ELSE jm.lid END)
          WHERE m.chat_jid = ? AND m.from_me = 0 AND m.sender_jid IS NOT NULL AND m.text IS NOT NULL
          GROUP BY m.sender_jid HAVING total >= ? ORDER BY total DESC`
       )
@@ -945,6 +974,37 @@ export class Store {
   mapJids(lid: string, pn: string): void {
     if (!lid.endsWith("@lid") || !pn.includes("@")) return;
     this.db.prepare(`INSERT INTO jid_map (lid, pn) VALUES (?, ?) ON CONFLICT(lid) DO UPDATE SET pn = excluded.pn`).run(lid, pn);
+  }
+
+  // ── presence (online / last seen) ────────────────────────
+
+  upsertPresence(p: { jid: string; state: string; lastSeen?: number | null }): void {
+    // Never overwrite a known lastSeen with null: WhatsApp sends "available"
+    // updates without a timestamp, and losing the previous one would make a
+    // contact who just came online look like we never saw them.
+    this.db
+      .prepare(
+        `INSERT INTO presence (jid, state, last_seen, updated_at)
+         VALUES (@jid, @state, @lastSeen, @now)
+         ON CONFLICT(jid) DO UPDATE SET
+           state = excluded.state,
+           last_seen = COALESCE(excluded.last_seen, presence.last_seen),
+           updated_at = excluded.updated_at`
+      )
+      .run({ jid: p.jid, state: p.state, lastSeen: p.lastSeen ?? null, now: Date.now() });
+  }
+
+  getPresence(jid: string): { jid: string; state: string; last_seen: number | null; updated_at: number } | null {
+    const direct = this.db.prepare(`SELECT * FROM presence WHERE jid = ?`).get(jid) as
+      | { jid: string; state: string; last_seen: number | null; updated_at: number }
+      | undefined;
+    if (direct) return direct;
+    // Presence can arrive under the other half of the @lid/phone pair.
+    const alt = jid.endsWith("@lid") ? this.pnForLid(jid) : this.lidForPn(jid);
+    if (!alt) return null;
+    return (this.db.prepare(`SELECT * FROM presence WHERE jid = ?`).get(alt) as
+      | { jid: string; state: string; last_seen: number | null; updated_at: number }
+      | undefined) ?? null;
   }
 
   lidForPn(pn: string): string | null {

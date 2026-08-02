@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { statfsSync, existsSync } from "node:fs";
+import { statfsSync, existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { Store } from "./store.js";
 import type { ConnectionState } from "./connection.js";
 import { loadNotebooksConfig } from "./notebooks-config.js";
@@ -79,16 +80,75 @@ function checkDisk(): CheckResult {
   try {
     const s = statfsSync(WACON_HOME);
     const freeMb = (s.bavail * s.bsize) / (1024 * 1024);
-    if (freeMb < 50) {
-      return { name: "Espacio en disco", status: "fail", detail: `solo ${freeMb.toFixed(0)} MB libres en ${WACON_HOME}`, fix: "Libera espacio: SQLite y el caché del playbook necesitan escribir." };
+    // Thresholds raised after a REAL failure: with ~544 MB free the WhatsApp
+    // session could not reconnect at all — Baileys writes its auth state on
+    // every handshake and died with ENOSPC, leaving the daemon stuck in
+    // waiting_qr as if the session had been unlinked. The old 50/500 MB
+    // limits reported that state as a mere "warn", which buried the real
+    // cause. WhatsApp history sync + SQLite WAL + the media cache need GBs.
+    if (freeMb < 1024) {
+      return {
+        name: "Espacio en disco",
+        status: "fail",
+        detail: `solo ${freeMb.toFixed(0)} MB libres en ${WACON_HOME}`,
+        fix: "Libera espacio YA: sin disco, WhatsApp no puede reconectar (falla al guardar la sesión y parece que te desvincularon).",
+      };
     }
-    if (freeMb < 500) {
-      return { name: "Espacio en disco", status: "warn", detail: `${freeMb.toFixed(0)} MB libres en ${WACON_HOME}` };
+    if (freeMb < 3072) {
+      return {
+        name: "Espacio en disco",
+        status: "warn",
+        detail: `${(freeMb / 1024).toFixed(1)} GB libres en ${WACON_HOME}`,
+        fix: "Vas justo. La sincronización de historial y el caché de medios pueden llenar lo que queda.",
+      };
     }
     return { name: "Espacio en disco", status: "ok", detail: `${(freeMb / 1024).toFixed(1)} GB libres` };
   } catch {
     return { name: "Espacio en disco", status: "warn", detail: "no se pudo medir el espacio libre" };
   }
+}
+
+/**
+ * Integrity of the stored WhatsApp credentials.
+ *
+ * Exists because of a real incident (2026-07-31): a full disk made Baileys
+ * truncate `creds.json` to 0 bytes, yet the daemon kept working for a whole
+ * day on its already-open socket. The loss only appeared on the next restart,
+ * as a bare `waiting_qr` that looked like the user had been unlinked. A live
+ * connection is NOT evidence that the session survives a restart — this is the
+ * only check that looks at what is actually on disk.
+ */
+function checkSessionFiles(): CheckResult {
+  const creds = join(WACON_HOME, "auth", "creds.json");
+  const name = "Credenciales de sesión";
+  if (!existsSync(creds)) {
+    return { name, status: "warn", detail: "no hay sesión guardada", fix: "Vincula con `wacon login`." };
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(creds, "utf8");
+  } catch {
+    return { name, status: "fail", detail: "no se pudo leer creds.json", fix: "Revisa permisos; si persiste, `wacon login`." };
+  }
+  if (raw.trim().length === 0) {
+    return {
+      name,
+      status: "fail",
+      detail: "creds.json está VACÍO — la sesión se perderá al reiniciar",
+      fix: "Casi siempre es disco lleno: libera espacio y vuelve a vincular con `wacon login`.",
+    };
+  }
+  try {
+    JSON.parse(raw);
+  } catch {
+    return {
+      name,
+      status: "fail",
+      detail: "creds.json está corrupto (JSON inválido)",
+      fix: "Suele ser una escritura truncada por falta de disco: libera espacio y `wacon login`.",
+    };
+  }
+  return { name, status: "ok", detail: "sesión guardada e íntegra" };
 }
 
 export interface DoctorInputs {
@@ -131,6 +191,7 @@ export function runDoctor(inputs: DoctorInputs): DoctorReport {
   const config = loadNotebooksConfig();
   checks.push(checkNotebookLM(config.nlmPath));
   checks.push(checkMediaBackends());
+  checks.push(checkSessionFiles());
   checks.push(checkDisk());
 
   return { checks, healthy: !checks.some((c) => c.status === "fail") };
