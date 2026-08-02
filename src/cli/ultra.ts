@@ -145,18 +145,45 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
   let receipts: "on" | "off" | "unknown" = "unknown";
   const mediaSlots: { messageId: string; kind: "image" | "audio" | "other" }[] = [];
   let running = true;
+  let tipShown = false;
+  // Reset every time a chat opens, so the divider marks "since I started
+  // reading this chat" rather than appearing once and never again.
+  let newDividerShown = false;
+  // jid → display name for the group currently open. Without this every
+  // incoming group message rendered the GROUP's name as "who", not the
+  // actual person who sent it — you couldn't tell members apart at all.
+  let memberNames = new Map<string, string>();
 
   const setStatus = (text: string) => {
     statusBar.setContent(` {cyan-fg}Wacon{/} · ${text} · {gray-fg}Ctrl+N/P chat · Ctrl+K buscar · Ctrl+O adjuntar · Ctrl+C salir{/}`);
     screen.render();
   };
 
+  let toastTimer: NodeJS.Timeout | null = null;
+  const showToast = (from: string, text: string) => {
+    toast.setContent(`{yellow-fg}💬 ${from}{/}\n{gray-fg}${text.slice(0, 60)}{/}`);
+    toast.show();
+    screen.render();
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+      toast.hide();
+      screen.render();
+    }, 6000);
+  };
+
+  // The list panel is only ~32% of the screen width. A 20-char name column
+  // (the old value) plus the mark and badge routinely overflowed a normal
+  // 80-column terminal, so blessed wrapped each row onto two lines — that
+  // was the actual source of the list "looking disorganized". 13 fits
+  // comfortably with border+badge even on a narrow terminal.
+  const NAME_COL_LIST = 13;
   const renderList = () => {
     chatList.setItems(
       filtered.map((r) => {
-        const badge = r.unread > 0 ? `{yellow-fg}(${r.unread}){/}` : "";
-        const mark = target && r.jid === target.jid ? "{green-fg}›{/} " : "  ";
-        return `${mark}${r.name.slice(0, 20).padEnd(20)} ${badge}`;
+        const mark = target && r.jid === target.jid ? "{green-fg}›{/}" : " ";
+        const name = r.name.slice(0, NAME_COL_LIST).padEnd(NAME_COL_LIST);
+        const badge = r.unread > 0 ? ` {yellow-fg}(${r.unread}){/}` : "";
+        return `${mark} ${name}${badge}`;
       })
     );
     screen.render();
@@ -193,26 +220,57 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
   };
 
   // Tracks the last speaker/day painted so consecutive lines from the same
-  // person can group together (no repeated name) with a blank line at every
-  // turn change — this is what makes the log read like a real chat instead
-  // of a flat, undifferentiated stream.
-  let lastSpeaker: "yo" | "them" | null = null;
+  // person can group together with a blank line at every turn change — this
+  // is what makes the log read like a real chat instead of a flat,
+  // undifferentiated stream.
+  let lastSpeaker: string | null = null;
   let lastDay: string | null = null;
   const dayLabel = (ts: number) => new Date(ts).toLocaleDateString("es-PE", { day: "2-digit", month: "short" });
+  // Every "who" label is padded to this width so message bodies always start
+  // at the same column — variable-width names were the "sangría" (ragged
+  // indent) that made group chats hard to scan.
+  const NAME_COL_CONVO = 10;
+  // "#4321" instead of a bare number — the last 4 digits alone could be
+  // misread as part of a real phone number, especially for @lid ids, which
+  // aren't phone numbers at all. The "#" signals "not a name, just a tag".
+  const senderFallback = (jid: string) => `#${jid.split("@")[0]?.slice(-4) ?? "?"}`;
 
-  const renderLine = (m: { from_me?: number; text: string | null; timestamp: number; message_type?: string; id?: string }) => {
+  // In a busy group everyone in the same colour is still hard to follow, so
+  // each participant gets a stable colour derived from their jid (same
+  // person, same colour every session). Green is reserved for "yo".
+  const MEMBER_COLORS = ["cyan", "magenta", "yellow", "blue", "red", "white"];
+  const colorFor = (key: string): string => {
+    let hash = 0;
+    for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+    return MEMBER_COLORS[hash % MEMBER_COLORS.length]!;
+  };
+
+  const renderLine = (m: { from_me?: number; text: string | null; timestamp: number; message_type?: string; id?: string; sender_jid?: string | null }) => {
     const day = dayLabel(m.timestamp);
     if (day !== lastDay) {
       convo.log(`{gray-fg}── ${day} ──{/}`);
       lastDay = day;
       lastSpeaker = null;
     }
-    const speaker: "yo" | "them" = m.from_me ? "yo" : "them";
-    if (speaker !== lastSpeaker) {
+    const isGroup = target ? target.jid.endsWith("@g.us") : false;
+    const rawName = m.from_me
+      ? "yo"
+      : isGroup && m.sender_jid
+        ? (memberNames.get(m.sender_jid) ?? senderFallback(m.sender_jid))
+        : target
+          ? firstName(target.name)
+          : "?";
+    // Group turns by the actual person, not just "me vs. them" — in a group
+    // with several senders, two different people back-to-back should still
+    // get the blank-line break.
+    if (rawName !== lastSpeaker) {
       if (lastSpeaker !== null) convo.log("");
-      lastSpeaker = speaker;
+      lastSpeaker = rawName;
     }
-    const who = speaker === "yo" ? "{green-fg}{bold}yo{/}{/}" : `{cyan-fg}{bold}${target ? firstName(target.name) : "?"}{/}{/}`;
+    // Colour by the actual person in groups (so members are told apart at a
+    // glance); a 1:1 chat has only one counterpart, so plain cyan is enough.
+    const color = m.from_me ? "green" : isGroup && m.sender_jid ? colorFor(m.sender_jid) : "cyan";
+    const who = `{${color}-fg}{bold}${rawName.slice(0, NAME_COL_CONVO).padEnd(NAME_COL_CONVO)}{/}{/}`;
     let body = m.text ?? `{gray-fg}(${m.message_type ?? "media"}){/}`;
     const kind = mediaKindOf(m.message_type, m.text);
     if (kind && m.id) {
@@ -228,6 +286,18 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
     mediaSlots.length = 0;
     lastSpeaker = null;
     lastDay = null;
+    newDividerShown = false;
+    memberNames = new Map();
+    if (t.jid.endsWith("@g.us")) {
+      // minMessages:1 so even someone who has posted once resolves by name
+      // instead of falling back to a jid fragment.
+      try {
+        const members = (await client.groupMembers(t.jid, 1)) as { sender_jid: string; display_name: string | null }[];
+        for (const mem of members) if (mem.display_name) memberNames.set(mem.sender_jid, mem.display_name);
+      } catch {
+        // best-effort — worst case senders show a short jid fragment
+      }
+    }
     convo.setLabel(` ${t.name} `);
     convo.setContent("");
     const msgs = await client.readMessages(t.jid, 30);
@@ -247,13 +317,20 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
       try {
         const r = (await client.waitForMessages({ since: cursor, timeoutSeconds: 50 })) as {
           cursor: number;
-          events: { id: string; chat: string; chatName: string | null; text: string | null; at: string; type: string }[];
+          events: { id: string; chat: string; chatName: string | null; text: string | null; at: string; type: string; from: string | null }[];
         };
         cursor = r.cursor;
         for (const e of r.events) {
           if (!running) break;
           if (activeJid !== null && e.chat === activeJid) {
-            renderLine({ from_me: 0, text: e.text, timestamp: new Date(e.at).getTime(), message_type: e.type, id: e.id });
+            // One "nuevos" divider per batch of arrivals, so you can always
+            // see where the conversation was when you last looked.
+            if (!newDividerShown) {
+              convo.log("{yellow-fg}── nuevos mensajes ──{/}");
+              lastSpeaker = null;
+              newDividerShown = true;
+            }
+            renderLine({ from_me: 0, text: e.text, timestamp: new Date(e.at).getTime(), message_type: e.type, id: e.id, sender_jid: e.from });
             convo.setScrollPerc(100);
             await client.markRead(activeJid, 5).catch(() => undefined);
             const row = rows.find((x) => x.jid === e.chat);
@@ -476,39 +553,49 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
   input.key(["C-s"], attachSticker);
 
   const HELP =
-    "{bold}Wacon ultra{/}\n\n" +
+    "{bold}Wacon ultra — WhatsApp en tu terminal{/}\n\n" +
+    "{cyan-fg}Moverte entre chats{/}\n" +
     "  Ctrl+N/P  chat siguiente / anterior (funciona escribiendo)\n" +
-    "  Ctrl+K    buscar/saltar a un chat (funciona escribiendo)\n" +
-    "  Esc/Tab   ir a la lista de chats\n" +
-    "  ↑↓        moverse en la lista\n" +
-    "  Enter     abrir chat / enviar / ver media\n" +
-    "  /         buscar un chat (solo desde la lista)\n" +
-    "  Ctrl+F    buscar dentro de la conversación\n" +
-    "  Ctrl+O    adjuntar un archivo (imagen, PDF, audio…)\n" +
+    "  Ctrl+K    buscar y saltar a un chat (funciona escribiendo)\n" +
+    "  Esc/Tab   ir a la lista · ↑↓ moverte · Enter abrir\n" +
+    "  /         buscar un chat (solo desde la lista)\n\n" +
+    "{cyan-fg}Dentro de una conversación{/}\n" +
+    "  Enter     enviar el mensaje que escribiste\n" +
+    "  Ctrl+O    adjuntar archivo (se abre un explorador)\n" +
     "  Ctrl+S    enviar un sticker\n" +
+    "  Ctrl+F    buscar dentro de la conversación\n" +
+    "  Enter     (sobre la conversación) abre la última foto/audio\n\n" +
     "  Ctrl+C    salir\n\n" +
-    "  {gray-fg}(pulsa cualquier tecla para cerrar){/}";
-  const showHelp = () => {
-    const help = blessed.box({
+    "  {gray-fg}(pulsa Esc o Enter para cerrar){/}";
+
+  /** Modal helper — every overlay must restore input focus on close. */
+  const showOverlay = (label: string, content: string, height: number) => {
+    const box = blessed.box({
       parent: screen,
-      label: " Ayuda ",
+      label: ` ${label} `,
       top: "center",
       left: "center",
-      width: "50%",
-      height: 15,
+      width: "60%",
+      height,
       border: { type: "line" },
       tags: true,
-      content: HELP,
+      content,
+      scrollable: true,
+      keys: true,
       style: { border: { fg: "cyan" } },
     });
-    help.focus();
-    help.key(["escape", "enter", "space", "q", "?", "f1"], () => {
-      (help as unknown as { destroy: () => void }).destroy();
+    box.focus();
+    box.key(["escape", "enter", "space", "q", "?", "f1"], () => {
+      (box as unknown as { destroy: () => void }).destroy();
+      // Without an open chat there is no input to return to — focus the list,
+      // otherwise closing the overlay would leave the keyboard doing nothing.
       if (target) armInput();
+      else chatList.focus();
       screen.render();
     });
     screen.render();
   };
+  const showHelp = () => showOverlay("Ayuda", HELP, 24);
   screen.key(["?", "f1"], showHelp);
 
   const quit = () => {
@@ -516,7 +603,9 @@ export async function runUltra(client: DaemonClient, initialQuery?: string): Pro
     screen.destroy();
     process.exit(0);
   };
-  screen.key(["C-c", "q"], quit);
+  // Ctrl+C only — a bare "q" would quit the whole app while simply browsing
+  // the chat list, which is far too easy to hit by accident.
+  screen.key(["C-c"], quit);
 
   // ── boot ─────────────────────────────────────────────────
   receipts = await client.readReceiptsMode().catch(() => "unknown" as const);
