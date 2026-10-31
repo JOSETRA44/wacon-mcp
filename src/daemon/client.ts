@@ -40,6 +40,9 @@ export class DaemonClient implements WaconApi {
   listChats(limit?: number): ReturnType<WaconApi["listChats"]> {
     return this.rpc("listChats", [limit]);
   }
+  chatOverview(limit?: number): ReturnType<WaconApi["chatOverview"]> {
+    return this.rpc("chatOverview", [limit]);
+  }
   readMessages(chat: string, limit?: number, beforeTs?: number): ReturnType<WaconApi["readMessages"]> {
     return this.rpc("readMessages", [chat, limit, beforeTs]);
   }
@@ -229,6 +232,11 @@ export class DaemonClient implements WaconApi {
   }
   sendFile(chat: string, filePath: string, opts?: Parameters<WaconApi["sendFile"]>[2]): ReturnType<WaconApi["sendFile"]> {
     return this.rpc("sendFile", [chat, filePath, opts], 180_000);
+  }
+  // Only the text crosses the wire — synthesis and upload both happen daemon-side,
+  // which is why this needs the same generous timeout as a file upload.
+  sendVoice(chat: string, text: string, opts?: Parameters<WaconApi["sendVoice"]>[2]): ReturnType<WaconApi["sendVoice"]> {
+    return this.rpc("sendVoice", [chat, text, opts], 180_000);
   }
   async logout(): Promise<void> {
     await this.rpc("logout");

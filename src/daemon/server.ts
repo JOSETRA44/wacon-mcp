@@ -13,6 +13,7 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "status",
   "qr",
   "listChats",
+  "chatOverview",
   "readMessages",
   "searchMessages",
   "searchContacts",
@@ -75,6 +76,7 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "listStickers",
   "sendSticker",
   "sendFile",
+  "sendVoice",
   "logout",
   "relogin",
 ]);
