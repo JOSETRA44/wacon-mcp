@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { DB_PATH, ensureDirs } from "./paths.js";
 import { vectorize, toBlob } from "../memory/vectorizer.js";
+import { VISIBLE_MESSAGE_SQL } from "./message-types.js";
 
 export interface ChatRow {
   jid: string;
@@ -8,6 +9,19 @@ export interface ChatRow {
   is_group: number;
   unread_count: number;
   last_message_ts: number | null;
+}
+
+export interface ChatOverviewRow {
+  jid: string;
+  is_group: number;
+  unread_count: number;
+  last_message_ts: number | null;
+  display_name: string | null;
+  alt_jid: string | null;
+  last_text: string | null;
+  last_from_me: number | null;
+  last_type: string | null;
+  last_sender_name: string | null;
 }
 
 export interface ContactRow {
@@ -362,6 +376,9 @@ export class Store {
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.exec(SCHEMA);
+    // Repair rows written while upsertChat leaked its "-1 = unknown" sentinel
+    // into the INSERT path; a negative counter broke every later +1.
+    this.db.exec(`UPDATE chats SET unread_count = 0 WHERE unread_count < 0`);
   }
 
   close(): void {
@@ -374,7 +391,7 @@ export class Store {
     this.db
       .prepare(
         `INSERT INTO chats (jid, name, is_group, unread_count, last_message_ts)
-         VALUES (@jid, @name, @isGroup, @unreadCount, @lastMessageTs)
+         VALUES (@jid, @name, @isGroup, MAX(@unreadCount, 0), @lastMessageTs)
          ON CONFLICT(jid) DO UPDATE SET
            name = COALESCE(excluded.name, chats.name),
            is_group = MAX(chats.is_group, excluded.is_group),
@@ -390,6 +407,19 @@ export class Store {
       });
   }
 
+  /**
+   * Keep WhatsApp's own unread counter live. History sync only delivers a
+   * snapshot, so without this the badge froze at whatever it was at link time.
+   */
+  bumpUnread(jid: string): void {
+    this.db.prepare(`UPDATE chats SET unread_count = unread_count + 1 WHERE jid = ?`).run(jid);
+  }
+
+  /** Reading (or replying to) a chat clears its badge, same as on the phone. */
+  clearUnread(jid: string): void {
+    this.db.prepare(`UPDATE chats SET unread_count = 0 WHERE jid = ?`).run(jid);
+  }
+
   listChats(limit = 30): (ChatRow & { display_name: string | null })[] {
     // A contact's name can live under either half of an @lid<->phone-number
     // pair (WhatsApp's own privacy-jid split, see jid_map) — without this
@@ -402,10 +432,44 @@ export class Store {
          LEFT JOIN contacts ct ON ct.jid = c.jid
          LEFT JOIN jid_map jm ON jm.lid = c.jid OR jm.pn = c.jid
          LEFT JOIN contacts ct2 ON ct2.jid = (CASE WHEN jm.lid = c.jid THEN jm.pn ELSE jm.lid END)
+         -- WhatsApp's internal threads are not conversations a person opens.
+         WHERE c.jid NOT IN ('status@broadcast') AND c.jid NOT LIKE '%@newsletter' AND c.jid NOT LIKE '%@broadcast'
+         -- The jid_map join can match several rows per chat; without this a
+         -- single chat appeared repeatedly and ate into the LIMIT.
+         GROUP BY c.jid
          ORDER BY c.last_message_ts DESC NULLS LAST
          LIMIT ?`
       )
       .all(limit) as (ChatRow & { display_name: string | null })[];
+  }
+
+  /**
+   * Everything a WhatsApp-style chat list row needs in one query: name,
+   * unread badge, and the LAST message (text, who sent it, type) for the
+   * preview line. `alt_jid` is the other half of an @lid<->phone pair, so the
+   * client can fold the two halves of one person into a single row.
+   */
+  chatOverview(limit = 150): ChatOverviewRow[] {
+    return this.db
+      .prepare(
+        `SELECT c.jid, c.is_group, c.unread_count, c.last_message_ts,
+                COALESCE(c.name, ct.name, ct.notify_name, ct2.name, ct2.notify_name) AS display_name,
+                CASE WHEN jm.lid = c.jid THEN jm.pn WHEN jm.pn = c.jid THEN jm.lid END AS alt_jid,
+                m.text AS last_text, m.from_me AS last_from_me, m.message_type AS last_type,
+                COALESCE(cs.name, cs.notify_name) AS last_sender_name
+         FROM (SELECT * FROM chats
+               WHERE jid NOT IN ('status@broadcast') AND jid NOT LIKE '%@newsletter' AND jid NOT LIKE '%@broadcast'
+               ORDER BY last_message_ts DESC NULLS LAST LIMIT ?) c
+         LEFT JOIN contacts ct ON ct.jid = c.jid
+         LEFT JOIN jid_map jm ON jm.lid = c.jid OR jm.pn = c.jid
+         LEFT JOIN contacts ct2 ON ct2.jid = (CASE WHEN jm.lid = c.jid THEN jm.pn ELSE jm.lid END)
+         LEFT JOIN messages m ON m.rowid = (
+           SELECT rowid FROM messages WHERE chat_jid = c.jid AND ${VISIBLE_MESSAGE_SQL} ORDER BY timestamp DESC LIMIT 1)
+         LEFT JOIN contacts cs ON cs.jid = m.sender_jid
+         GROUP BY c.jid
+         ORDER BY c.last_message_ts DESC NULLS LAST`
+      )
+      .all(limit) as ChatOverviewRow[];
   }
 
   // ── contacts ─────────────────────────────────────────────
