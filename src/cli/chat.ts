@@ -142,6 +142,7 @@ ${c.bold("Comandos")}
   /switch <texto>   cambiar a un contacto por nombre/número
   /ver <n>          abrir una imagen/audio recibido en tu visor
   /send <archivo>   enviar imagen, audio, PDF… (--voz para nota de voz)
+  /voz <texto>      mandar una nota de voz diciendo ese texto
   /read [n]         cargar más historial (por defecto 25)
   /search <texto>   buscar en esta conversación
   /sticker <mood>   enviar un sticker (risa, carino, saludo, ok, disculpa...)
@@ -154,7 +155,7 @@ ${c.dim("Tab autocompleta comandos y nombres de contactos.")}
 
 /** Run the interactive session. Resolves when the user quits. */
 export async function runChat(client: DaemonClient, initialQuery?: string): Promise<void> {
-  const COMMANDS = ["/chats", "/switch ", "/send ", "/read ", "/search ", "/sticker ", "/who", "/help", "/quit"];
+  const COMMANDS = ["/chats", "/switch ", "/send ", "/voz ", "/read ", "/search ", "/sticker ", "/who", "/help", "/quit"];
   // Names of recent chats, so Tab can complete "/switch nay" → "/switch Nayda…".
   let completions: string[] = [];
   client
@@ -404,6 +405,18 @@ export async function runChat(client: DaemonClient, initialQuery?: string): Prom
               const r = await client.sendFile(target!.jid, filePath, { caption: caption || undefined, asVoiceNote, clientName: "cli" });
               if ("guidance" in r) line(c.yellow(`✖ ${r.guidance}`));
               else if (r.sent) printAbovePrompt(rl, ` ${c.dim(time(Date.now()))}  ${c.green("yo")}  ${c.dim(`[${r.kind}: ${r.fileName}]`)}${caption ? ` ${caption}` : ""}`);
+              else line(c.yellow(`✖ no enviado: ${r.reason ?? "bloqueado"}`));
+              break;
+            }
+            case "voz": {
+              if (!arg) {
+                line(c.dim("uso: /voz <lo que quieres decir>"));
+                break;
+              }
+              line(c.dim("grabando..."));
+              const r = await client.sendVoice(target!.jid, arg, { clientName: "cli" });
+              if ("guidance" in r) line(c.yellow(`✖ ${r.guidance}`));
+              else if (r.sent) printAbovePrompt(rl, ` ${c.dim(time(Date.now()))}  ${c.green("yo")}  ${c.dim(`[voz ${r.seconds ?? "?"}s]`)} ${arg}`);
               else line(c.yellow(`✖ no enviado: ${r.reason ?? "bloqueado"}`));
               break;
             }
