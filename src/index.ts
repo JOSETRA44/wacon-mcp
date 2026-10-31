@@ -2,12 +2,13 @@ import { Command } from "commander";
 import qrcodeTerminal from "qrcode-terminal";
 import { configureOutput, emit, fail, isJsonMode, c as pc } from "./cli/output.js";
 import { DaemonClient } from "./daemon/client.js";
-import { readDaemonInfo, clearDaemonInfo, pingDaemon } from "./daemon/lifecycle.js";
+import { readDaemonInfo, clearDaemonInfo, pingDaemon, stopDaemon, ensureDaemon } from "./daemon/lifecycle.js";
 import { runStdioServer } from "./mcp/stdio.js";
 import { PROFILE_SECTIONS, profilePath, type ProfileSection } from "./memory/profiles.js";
 import { WACON_HOME, PERSONA_PATH, CONFIG_PATH, DAEMON_LOG_PATH, NOTEBOOKS_PATH } from "./core/paths.js";
 import { FACT_CATEGORIES } from "./memory/facts.js";
 import { installSkills, defaultSkillsTarget } from "./core/skills-install.js";
+import { applyFixes, runOfflineDoctor } from "./core/doctor.js";
 import { runChat } from "./cli/chat.js";
 
 const program = new Command();
@@ -66,6 +67,23 @@ program
         await new Promise((r) => setTimeout(r, 1500));
       }
       die(`Timed out waiting for login (3 min). Try again — if no QR ever appeared, check ${DAEMON_LOG_PATH}.`);
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("daemon-restart")
+  .description("Stop the background daemon and start a fresh one (fixes a wedged/zombie session)")
+  .action(async () => {
+    try {
+      const { stopped, pid } = await stopDaemon();
+      if (pid === null) console.log(pc.dim("No había daemon registrado."));
+      else if (stopped) console.log(pc.green(`✔ Daemon detenido (pid ${pid}).`));
+      else die(`El daemon (pid ${pid}) no se detuvo. Ciérralo a mano y reintenta.`);
+      const info = await ensureDaemon();
+      console.log(pc.green(`✔ Daemon nuevo en marcha (pid ${info.pid}, puerto ${info.port}).`));
+      console.log(pc.dim("Si la sesión no vuelve sola, ejecuta `wacon login`."));
     } catch (err) {
       die(err);
     }
@@ -159,6 +177,20 @@ program
     try {
       const result = await client.send(chat, textParts.join(" "), "cli");
       if (result.sent) console.log(pc.green(`✔ sent (id: ${result.messageId})`));
+      else console.log(pc.yellow(`✖ not sent: ${result.reason}`));
+    } catch (err) {
+      die(err);
+    }
+  });
+
+program
+  .command("voice <chat> <text...>")
+  .description("Send a real voice note saying that text (needs tts configured in config.json)")
+  .action(async (chat: string, textParts: string[]) => {
+    try {
+      const result = await client.sendVoice(chat, textParts.join(" "), { clientName: "cli" });
+      if ("guidance" in result) console.log(pc.yellow(`✖ ${result.guidance}`));
+      else if (result.sent) console.log(pc.green(`✔ voice note sent (${result.seconds ?? "?"}s, id: ${result.messageId})`));
       else console.log(pc.yellow(`✖ not sent: ${result.reason}`));
     } catch (err) {
       die(err);
@@ -407,13 +439,21 @@ program
 program
   .command("chat [contacto...]")
   .description("WhatsApp interactivo en la terminal (para humanos). `wacon chat ultra` abre la app de pantalla completa.")
-  .action(async (parts: string[]) => {
+  .option("--classic", "con `ultra`: usar la interfaz anterior (blessed)", false)
+  .action(async (parts: string[], opts: { classic: boolean }) => {
     try {
       if (isJsonMode()) die("`wacon chat` es interactivo; los agentes deben usar el MCP o los comandos con --json");
       // `wacon chat ultra [contacto]` → full-screen app; otherwise the light client.
+      // `--classic` keeps the previous blessed UI reachable as a fallback.
       if (parts[0]?.toLowerCase() === "ultra") {
-        const { runUltra } = await import("./cli/ultra.js");
-        await runUltra(client, parts.slice(1).join(" ") || undefined);
+        const query = parts.slice(1).join(" ") || undefined;
+        if (opts.classic) {
+          const { runUltra } = await import("./cli/ultra.js");
+          await runUltra(client, query);
+        } else {
+          const { runTui } = await import("./tui/index.js");
+          await runTui(client, query);
+        }
       } else {
         await runChat(client, parts.join(" ") || undefined);
       }
@@ -428,8 +468,8 @@ program
   .action(async (contacto: string | undefined) => {
     try {
       if (isJsonMode()) die("`wacon tui` es interactivo; los agentes deben usar el MCP o los comandos con --json");
-      const { runUltra } = await import("./cli/ultra.js");
-      await runUltra(client, contacto);
+      const { runTui } = await import("./tui/index.js");
+      await runTui(client, contacto);
     } catch (err) {
       die(err);
     }
@@ -688,9 +728,25 @@ program
 program
   .command("doctor")
   .description("Diagnose Wacon: WhatsApp, DB, daemon, NotebookLM, disk")
-  .action(async () => {
+  .option("--fix", "apply the safe automatic repairs (restore creds backup, clear stale daemon.json)", false)
+  .action(async (opts: { fix?: boolean }) => {
     try {
-      const report = await client.doctor();
+      if (opts.fix) {
+        const outcomes = applyFixes();
+        for (const o of outcomes) {
+          console.log(`${o.applied ? pc.green("✓") : pc.yellow("–")} ${pc.bold(o.action)}: ${o.detail}`);
+        }
+        console.log("");
+      }
+      // Diagnosing a daemon that won't start is the whole point of doctor, so
+      // fall back to the filesystem-only checks instead of failing outright.
+      let report;
+      try {
+        report = await client.doctor();
+      } catch {
+        console.log(pc.yellow("El daemon no responde — diagnóstico offline (solo disco y archivos).\n"));
+        report = runOfflineDoctor();
+      }
       emit(report, () => {
         for (const check of report.checks) {
           const icon = check.status === "ok" ? pc.green("✓") : check.status === "warn" ? pc.yellow("⚠") : pc.red("✗");

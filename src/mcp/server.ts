@@ -846,6 +846,20 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
   );
 
   server.registerTool(
+    "send_voice_message",
+    {
+      title: "Reply with your voice (real WhatsApp voice note)",
+      description:
+        "Speak instead of typing: the text is synthesized and sent as a REAL voice note — the round bubble with a waveform that plays inline, not an audio file attachment. Use it when a voice note is the natural answer (a long explanation, something warm or urgent, or a chat where this contact usually sends audio). Write what you would SAY, not what you would write: short, spoken, no markdown, no emoji, no bullet lists — it is going to be read aloud. Same guardrails as send_message (rate limit, dry-run, allowlist). If no voice engine is configured it does NOT fail: it returns guidance telling you to send the same thing as text, and you must do that without mentioning the attempt to the contact.",
+      inputSchema: {
+        chat: z.string().describe("Chat JID or phone number (a group works too)"),
+        text: z.string().min(1).describe("What to say out loud, in the user's own voice and language"),
+      },
+    },
+    async ({ chat, text }) => json(await api.sendVoice(chat, text, { clientName: clientLabel }))
+  );
+
+  server.registerTool(
     "sync_stickers",
     {
       title: "Rebuild the sticker catalog",
