@@ -20,6 +20,8 @@ import { logError, GUIDANCE, type Guided } from "./errors.js";
 import { fetchMedia } from "../media/media.js";
 import { transcribe } from "../media/transcription.js";
 import { prepareMedia, toMessageContent } from "../media/send-media.js";
+import { synthesize } from "../media/tts.js";
+import { findFfmpeg, toVoiceNote, voiceNoteContent, formatDuration } from "../media/voice.js";
 import { importPack, indexOwnStickers, stickerAffinity, MOODS } from "../media/stickers.js";
 import type { FactRow, EventRow, TaskRow, ErrorRow } from "./store.js";
 
@@ -224,6 +226,10 @@ export class WaconService {
 
   listChats(limit = 30) {
     return this.store.listChats(limit);
+  }
+
+  chatOverview(limit = 150) {
+    return this.store.chatOverview(limit);
   }
 
   readMessages(chatJid: string, limit = 30, beforeTs?: number): MessageRow[] {
@@ -458,6 +464,7 @@ export class WaconService {
       .map((m) => ({ id: m.id, participant: chatJid.endsWith("@g.us") ? m.sender_jid : null }));
     if (unread.length === 0) return { marked: 0 };
     await this.connection.markRead(chatJid, unread);
+    this.store.clearUnread(chatJid);
     return { marked: unread.length };
   }
 
@@ -617,7 +624,12 @@ export class WaconService {
   // ── diagnostics ──────────────────────────────────────────
 
   doctor(daemon: { port: number; pid: number } | null): DoctorReport {
-    return runDoctor({ connectionState: this.connection.state, store: this.store, daemon });
+    return runDoctor({
+      connectionState: this.connection.state,
+      store: this.store,
+      daemon,
+      lastAuthError: this.connection.lastAuthError,
+    });
   }
 
   observe(jidOrPhone: string, section: ProfileSection, observation: string): void {
@@ -872,7 +884,15 @@ export class WaconService {
     }
 
     try {
-      const content = toMessageContent(media, { caption: opts.caption, asVoiceNote: opts.asVoiceNote });
+      // A real voice note has to be ogg/opus with a waveform, so audio marked as
+      // one goes through the voice packer instead of being shipped as-is.
+      let content: Record<string, unknown>;
+      if (opts.asVoiceNote && media.kind === "audio") {
+        const voice = toVoiceNote(media.buffer, media.mimetype, findFfmpeg(config.ffmpegPath));
+        content = voiceNoteContent(voice);
+      } else {
+        content = toMessageContent(media, { caption: opts.caption, asVoiceNote: opts.asVoiceNote });
+      }
       const { id } = await this.connection.sendMedia(chatJid, content);
       this.store.logSent({ chatJid, text: label, clientName, dryRun: false });
       return { sent: true, dryRun: false, messageId: id, kind: media.kind, fileName: media.fileName };
@@ -881,6 +901,74 @@ export class WaconService {
         this.store,
         { operation: "send_file", chatJid, error: err, context: { filePath, kind: media.kind }, client: clientName },
         "No pude enviar el archivo. Si el contenido importa, descríbelo por texto o pide reenviarlo más tarde."
+      );
+    }
+  }
+
+  /**
+   * Speak: synthesize `text` and send it as a real WhatsApp voice note.
+   *
+   * The agent sends TEXT over the wire, never audio — the daemon's RPC body is
+   * capped at 2 MB and the API key lives here, in one process. Same guardrails
+   * as every other send, and a missing/broken TTS degrades to guidance telling
+   * the agent to say the same thing in writing.
+   */
+  async sendVoice(
+    chatJidOrPhone: string,
+    text: string,
+    opts: { clientName?: string } = {}
+  ): Promise<(SendResult & { seconds?: number; transcoded?: boolean }) | Guided> {
+    const chatJid = normalizeJid(chatJidOrPhone);
+    const clientName = opts.clientName ?? "mcp";
+    const config = loadConfig();
+    const check = checkSend(config, this.store, chatJid);
+    if (!check.allowed) return { sent: false, dryRun: check.dryRun, messageId: null, reason: check.reason };
+
+    const spoken = text.trim();
+    if (!spoken) return { sent: false, dryRun: check.dryRun, messageId: null, reason: "no hay texto que decir" };
+
+    const tts = await synthesize(config.tts, spoken);
+    if (!tts.ok || !tts.buffer) {
+      return logError(
+        this.store,
+        { operation: "send_voice", chatJid, error: tts.reason ?? "tts failed", context: { chars: spoken.length }, client: clientName },
+        config.tts.backend === "none" ? GUIDANCE.ttsNotConfigured : GUIDANCE.voiceFailed
+      );
+    }
+
+    let voice;
+    try {
+      voice = toVoiceNote(tts.buffer, tts.mimetype ?? "audio/ogg", findFfmpeg(config.ffmpegPath));
+    } catch (err) {
+      return logError(
+        this.store,
+        { operation: "send_voice", chatJid, error: err, context: { mimetype: tts.mimetype }, client: clientName },
+        GUIDANCE.voiceFailed
+      );
+    }
+
+    // The spoken text is kept in the log on purpose: the persona and memory
+    // layers read sent_log, and storing a bare "[nota de voz]" would lose
+    // everything the user "said" out loud.
+    const label = `[voz ${formatDuration(voice.seconds)}] ${spoken}`;
+    if (check.dryRun) {
+      this.store.logSent({ chatJid, text: label, clientName, dryRun: true });
+      return { sent: false, dryRun: true, messageId: null, reason: "dryRun activo — nota de voz registrada pero NO enviada", seconds: voice.seconds };
+    }
+
+    try {
+      // Cosmetic, and exactly what the contact would see if a human were holding
+      // the mic. Never allowed to break the send.
+      await this.connection.setPresence("recording", chatJid).catch(() => undefined);
+      const { id } = await this.connection.sendMedia(chatJid, voiceNoteContent(voice));
+      await this.connection.setPresence("paused", chatJid).catch(() => undefined);
+      this.store.logSent({ chatJid, text: label, clientName, dryRun: false });
+      return { sent: true, dryRun: false, messageId: id, seconds: voice.seconds, transcoded: voice.transcoded };
+    } catch (err) {
+      return logError(
+        this.store,
+        { operation: "send_voice", chatJid, error: err, context: { seconds: voice.seconds }, client: clientName },
+        GUIDANCE.voiceFailed
       );
     }
   }
