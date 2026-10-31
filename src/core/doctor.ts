@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { statfsSync, existsSync, readFileSync } from "node:fs";
+import { statfsSync, existsSync, readFileSync, copyFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { Store } from "./store.js";
 import type { ConnectionState } from "./connection.js";
@@ -7,6 +7,7 @@ import { loadNotebooksConfig } from "./notebooks-config.js";
 import { loadConfig } from "./config.js";
 import { readPersona, isTemplateBody } from "../memory/persona.js";
 import { WACON_HOME } from "./paths.js";
+import { findFfmpeg } from "../media/voice.js";
 
 export type CheckStatus = "ok" | "warn" | "fail";
 
@@ -120,9 +121,24 @@ function checkDisk(): CheckResult {
  */
 function checkSessionFiles(): CheckResult {
   const creds = join(WACON_HOME, "auth", "creds.json");
+  const backup = `${creds}.bak`;
   const name = "Credenciales de sesión";
+  // A usable backup downgrades every failure below from "re-scan the QR" to
+  // "restorable", so report it alongside the diagnosis instead of hiding it.
+  const hasBackup = existsSync(backup) && (() => {
+    try {
+      return readFileSync(backup, "utf8").trim().length > 0;
+    } catch {
+      return false;
+    }
+  })();
+  const restoreHint = hasBackup
+    ? " Hay respaldo (creds.json.bak): `wacon doctor --fix` lo restaura sin re-escanear."
+    : "";
   if (!existsSync(creds)) {
-    return { name, status: "warn", detail: "no hay sesión guardada", fix: "Vincula con `wacon login`." };
+    return hasBackup
+      ? { name, status: "fail", detail: `falta creds.json pero existe el respaldo`, fix: `Ejecuta \`wacon doctor --fix\` para restaurarlo, o \`wacon login\` para vincular de cero.` }
+      : { name, status: "warn", detail: "no hay sesión guardada", fix: "Vincula con `wacon login`." };
   }
   let raw: string;
   try {
@@ -135,7 +151,7 @@ function checkSessionFiles(): CheckResult {
       name,
       status: "fail",
       detail: "creds.json está VACÍO — la sesión se perderá al reiniciar",
-      fix: "Casi siempre es disco lleno: libera espacio y vuelve a vincular con `wacon login`.",
+      fix: `Casi siempre es disco lleno: libera espacio.${restoreHint || " Luego vuelve a vincular con `wacon login`."}`,
     };
   }
   try {
@@ -145,16 +161,99 @@ function checkSessionFiles(): CheckResult {
       name,
       status: "fail",
       detail: "creds.json está corrupto (JSON inválido)",
-      fix: "Suele ser una escritura truncada por falta de disco: libera espacio y `wacon login`.",
+      fix: `Suele ser una escritura truncada por falta de disco: libera espacio.${restoreHint || " Luego `wacon login`."}`,
     };
   }
-  return { name, status: "ok", detail: "sesión guardada e íntegra" };
+  return {
+    name,
+    status: "ok",
+    detail: `sesión guardada e íntegra${hasBackup ? " (con respaldo)" : " — aún sin respaldo"}`,
+    fix: hasBackup ? undefined : "El respaldo se crea solo en la próxima rotación de credenciales.",
+  };
+}
+
+/**
+ * Is the daemon recorded in daemon.json the one actually running?
+ *
+ * A daemon whose session died sits there answering /health with 200 forever,
+ * and `ensureDaemon` happily reuses it — that is how a zombie from days ago
+ * kept serving a dead `logged_out` state. A stale PID file plus an occupied
+ * port is the other half: new daemons then crash in an EADDRINUSE loop.
+ */
+export function checkDaemonProcess(daemon: { port: number; pid: number } | null, connectionState: ConnectionState): CheckResult {
+  const name = "Proceso del daemon";
+  const info = readDaemonInfoFile();
+  if (!daemon) {
+    if (info && !pidAlive(info.pid)) {
+      return {
+        name,
+        status: "warn",
+        detail: `daemon.json apunta al pid ${info.pid}, que ya no existe`,
+        fix: "Registro obsoleto; se limpia solo al siguiente comando, o con `wacon doctor --fix`.",
+      };
+    }
+    return { name, status: "warn", detail: "no reportado", fix: "El daemon arranca solo al usar cualquier comando." };
+  }
+  const uptimeMs = info?.startedAt ? Date.now() - new Date(info.startedAt).getTime() : 0;
+  const days = uptimeMs / 86_400_000;
+  // A long-lived daemon is fine when connected; stuck in a non-connected state
+  // it is the zombie pattern, because nothing re-enters the connect path.
+  if (connectionState !== "connected" && days >= 1) {
+    return {
+      name,
+      status: "fail",
+      detail: `lleva ${days.toFixed(1)} días vivo en estado '${connectionState}' — daemon zombi`,
+      fix: "Reinícialo: `wacon daemon-restart` (o `wacon login`, que ya fuerza un enlace nuevo).",
+    };
+  }
+  return { name, status: "ok", detail: `vivo (pid ${daemon.pid}, puerto ${daemon.port}${uptimeMs ? `, ${formatUptime(uptimeMs)}` : ""})` };
+}
+
+function formatUptime(ms: number): string {
+  const h = ms / 3_600_000;
+  if (h < 1) return `${Math.round(ms / 60_000)} min`;
+  if (h < 48) return `${h.toFixed(1)} h`;
+  return `${(h / 24).toFixed(1)} días`;
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means the process exists but belongs to someone else.
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function readDaemonInfoFile(): { pid: number; port: number; startedAt?: string } | null {
+  try {
+    const p = join(WACON_HOME, "daemon.json");
+    if (!existsSync(p)) return null;
+    return JSON.parse(readFileSync(p, "utf8")) as { pid: number; port: number; startedAt?: string };
+  } catch {
+    return null;
+  }
+}
+
+/** Surface a credential write that failed at runtime (e.g. disk filled up). */
+export function checkAuthWrites(lastAuthError: string | null): CheckResult {
+  const name = "Escritura de credenciales";
+  if (!lastAuthError) return { name, status: "ok", detail: "sin errores al guardar la sesión" };
+  return {
+    name,
+    status: "fail",
+    detail: lastAuthError,
+    fix: "La sesión en memoria sigue viva pero NO sobrevivirá a un reinicio. Libera disco y fuerza una rotación con `wacon status`.",
+  };
 }
 
 export interface DoctorInputs {
   connectionState: ConnectionState;
   store: Store;
   daemon: { port: number; pid: number } | null;
+  /** Last credential write/read failure seen by the live connection, if any. */
+  lastAuthError?: string | null;
 }
 
 export function runDoctor(inputs: DoctorInputs): DoctorReport {
@@ -177,12 +276,8 @@ export function runDoctor(inputs: DoctorInputs): DoctorReport {
     checks.push({ name: "Base de datos local", status: "fail", detail: err instanceof Error ? err.message : String(err), fix: "La DB SQLite puede estar corrupta; revisa ~/.wacon/wacon.db" });
   }
 
-  // Daemon
-  checks.push(
-    inputs.daemon
-      ? { name: "Daemon", status: "ok", detail: `vivo (pid ${inputs.daemon.pid}, puerto ${inputs.daemon.port})` }
-      : { name: "Daemon", status: "warn", detail: "no reportado", fix: "El daemon arranca solo al usar cualquier comando." }
-  );
+  // Daemon: liveness, staleness and the zombie pattern
+  checks.push(checkDaemonProcess(inputs.daemon, s));
 
   // Knowledge layer: is the persona actually usable by agents?
   checks.push(checkPersona());
@@ -192,9 +287,88 @@ export function runDoctor(inputs: DoctorInputs): DoctorReport {
   checks.push(checkNotebookLM(config.nlmPath));
   checks.push(checkMediaBackends());
   checks.push(checkSessionFiles());
+  checks.push(checkAuthWrites(inputs.lastAuthError ?? null));
   checks.push(checkDisk());
 
   return { checks, healthy: !checks.some((c) => c.status === "fail") };
+}
+
+/**
+ * The checks that need nothing but the filesystem.
+ *
+ * `wacon doctor` used to run entirely through the daemon, so the one moment
+ * you most need a diagnosis — the daemon won't start — was exactly the moment
+ * the command failed too. The CLI falls back to this.
+ */
+export function runOfflineDoctor(): DoctorReport {
+  const checks: CheckResult[] = [
+    {
+      name: "Daemon",
+      status: "fail",
+      detail: "no responde — diagnóstico en modo offline (solo disco y archivos)",
+      fix: `Revisa el log: ${join(WACON_HOME, "daemon.log")}. Si el puerto está ocupado por un proceso colgado, ciérralo y reintenta.`,
+    },
+    checkDaemonProcess(null, "disconnected"),
+    checkSessionFiles(),
+    checkDisk(),
+    checkPersona(),
+  ];
+  return { checks, healthy: false };
+}
+
+export interface FixOutcome {
+  action: string;
+  applied: boolean;
+  detail: string;
+}
+
+/**
+ * Safe, reversible remediations only: restoring a credential backup and
+ * clearing a stale PID file. Anything that could destroy a working session
+ * (wiping the auth dir) stays a manual decision.
+ */
+export function applyFixes(): FixOutcome[] {
+  const outcomes: FixOutcome[] = [];
+
+  const creds = join(WACON_HOME, "auth", "creds.json");
+  const backup = `${creds}.bak`;
+  const credsUnusable = (() => {
+    if (!existsSync(creds)) return true;
+    try {
+      const raw = readFileSync(creds, "utf8");
+      if (raw.trim().length === 0) return true;
+      JSON.parse(raw);
+      return false;
+    } catch {
+      return true;
+    }
+  })();
+  if (credsUnusable && existsSync(backup)) {
+    try {
+      // Keep the damaged original: if the backup turns out to be older than
+      // expected, the user still has whatever the primary held.
+      if (existsSync(creds)) copyFileSync(creds, `${creds}.broken`);
+      copyFileSync(backup, creds);
+      outcomes.push({ action: "Restaurar credenciales", applied: true, detail: "creds.json restaurado desde creds.json.bak (el dañado quedó en creds.json.broken)" });
+    } catch (err) {
+      outcomes.push({ action: "Restaurar credenciales", applied: false, detail: err instanceof Error ? err.message : String(err) });
+    }
+  } else if (credsUnusable) {
+    outcomes.push({ action: "Restaurar credenciales", applied: false, detail: "no hay respaldo utilizable; hace falta `wacon login`" });
+  }
+
+  const info = readDaemonInfoFile();
+  if (info && !pidAlive(info.pid)) {
+    try {
+      rmSync(join(WACON_HOME, "daemon.json"), { force: true });
+      outcomes.push({ action: "Limpiar daemon.json obsoleto", applied: true, detail: `el pid ${info.pid} ya no existe` });
+    } catch (err) {
+      outcomes.push({ action: "Limpiar daemon.json obsoleto", applied: false, detail: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  if (outcomes.length === 0) outcomes.push({ action: "Sin cambios", applied: false, detail: "no había nada reparable automáticamente" });
+  return outcomes;
 }
 
 /**
@@ -250,5 +424,31 @@ function checkMediaBackends(): CheckResult {
     parts.push("audio→API");
   }
   parts.push(v === "none" ? "imagen→bloque nativo MCP" : "imagen→API");
+
+  // Voice notes: the TTS engine and ffmpeg fail independently, and each failure
+  // degrades differently — no voice at all vs. a voice note without a waveform.
+  const ffmpeg = findFfmpeg(cfg.ffmpegPath);
+  if (cfg.tts.backend === "none") {
+    parts.push("voz→no configurada");
+  } else if (!cfg.tts.endpoint) {
+    return {
+      name: "Multimedia (backends)",
+      status: "warn",
+      detail: "tts openai-compatible sin endpoint",
+      fix: "Define tts.endpoint (URL /audio/speech) y tts.apiKey en config.json, o pon tts.backend en 'none'.",
+    };
+  } else {
+    parts.push(ffmpeg ? "voz→API (opus + onda)" : "voz→API (sin onda: falta ffmpeg)");
+  }
+  parts.push(ffmpeg ? `ffmpeg ok (${ffmpeg})` : "sin ffmpeg");
+
+  if (cfg.tts.backend !== "none" && !ffmpeg) {
+    return {
+      name: "Multimedia (backends)",
+      status: "warn",
+      detail: parts.join(", "),
+      fix: "Instala ffmpeg (o apunta ffmpegPath en config.json) para que las notas de voz lleven onda y duración exacta, y para poder mandar audios que no sean opus. Sin él las notas siguen enviándose.",
+    };
+  }
   return { name: "Multimedia (backends)", status: "ok", detail: parts.join(", ") };
 }
