@@ -162,7 +162,7 @@ Cliente de chat en la terminal, sin abrir un navegador y **sin dependencias nuev
 > _
 ```
 
-Si **otro contacto te escribe** te avisa con un número para saltar (`/2`), **Tab** autocompleta, y al reabrir **continúas donde lo dejaste** con enter. Dentro: `/ver <n>`, `/send <archivo>`, `/switch`, `/search`, `/sticker <mood>`, `/who`, `/quit`.
+Si **otro contacto te escribe** te avisa con un número para saltar (`/2`), **Tab** autocompleta, y al reabrir **continúas donde lo dejaste** con enter. Dentro: `/ver <n>`, `/send <archivo>`, `/voz <texto>`, `/switch`, `/search`, `/sticker <mood>`, `/who`, `/quit`.
 
 **Imágenes y audios recibidos:** cada uno se numera y `/ver <n>` lo abre en tu visor del sistema (una terminal no puede mostrarlos bien, así que no peleamos con eso). Si tienes configurado un backend de visión o transcripción, verás además la descripción o el texto del audio directamente.
 
@@ -175,6 +175,35 @@ Si **otro contacto te escribe** te avisa con un número para saltar (`/2`), **Ta
 ```
 
 Un solo camino detecta el tipo por la extensión: **imágenes y videos** con vista previa, **audio** (o nota de voz con waveform), y **cualquier otra cosa** —PDF, Word, Excel, zip— como documento conservando su nombre. Los agentes tienen la tool MCP `send_file`, así que pueden mandar un informe o una foto igual que tú. Mismos guardrails y degradación honesta si falla.
+
+## Responder con voz
+
+```bash
+# dentro del chat
+/voz ya voy saliendo, llego en veinte minutos
+
+# o desde fuera
+wacon voice "Nayda" "oye, se me hizo tarde pero ya salgo"
+```
+
+Manda una **nota de voz real** —la burbuja redonda con onda que se reproduce dentro del chat—, no un archivo de audio adjunto. Los agentes tienen la tool `send_voice_message(chat, text)`: escriben lo que quieren decir y Wacon lo sintetiza, lo empaqueta como ogg/opus mono con su onda de 64 barras y su duración, y lo envía. El contacto ve "grabando audio…" mientras tanto, como si hubiera alguien sujetando el micro.
+
+Necesita un motor de voz en `~/.wacon/config.json` (nada viene activado por defecto):
+
+```json
+{
+  "tts": {
+    "backend": "openai-compatible",
+    "endpoint": "https://api.openai.com/v1/audio/speech",
+    "apiKey": "sk-…",
+    "model": "gpt-4o-mini-tts",
+    "voice": "nova",
+    "maxChars": 1200
+  }
+}
+```
+
+Sirve cualquier endpoint compatible con OpenAI —OpenAI, Groq, o uno local tipo Kokoro/openedai-speech—, así que puedes tenerlo gratis y offline si quieres. **`ffmpeg` es opcional**: sin él la nota se envía igual (el endpoint ya devuelve opus) pero sin onda ni duración exacta; con él, además, puedes mandar como nota de voz cualquier audio que no sea opus. `wacon doctor` te dice en qué estado estás. Y si no hay motor configurado la tool **no falla**: devuelve una directriz para que el agente diga lo mismo por texto, sin comentarle nada al contacto.
 
 **Tics azules:** Wacon respeta la privacidad de tu cuenta automáticamente — si tienes las confirmaciones de lectura desactivadas, marcar como leído no notifica al otro. La cabecera te lo muestra (`vistos: on/off`).
 
@@ -224,7 +253,7 @@ wacon stickers -c nayda      # afinidad y moods con ese contacto
 **Stickers y archivos**: `list_stickers`, `send_sticker`, `sync_stickers`, `send_file`
 **Multimedia**: `view_image`, `transcribe_audio`, `get_error_log`
 **Tiempo/agenda**: `schedule_event`, `list_events`, `cancel_event`, `complete_event`, `add_task`, `list_tasks`, `complete_task`, `get_agenda`, `wait_for_triggers`
-**Envío**: `send_message` (con `typing_ms` para simular "escribiendo…")
+**Envío**: `send_message` (con `typing_ms` para simular "escribiendo…"), `send_voice_message` (nota de voz real desde texto)
 
 Más resources (`wacon://persona`, `wacon://profile/{chat}`) y el prompt `reply_in_style`.
 

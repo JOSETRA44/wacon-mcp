@@ -138,6 +138,29 @@ informe", localiza el archivo primero y confirma cuál es antes de enviarlo — 
 archivo equivocado es difícil de retirar. Si falla, recibes una directriz: sigue
 en texto en vez de inventar que se envió.
 
+## Responder con voz
+
+`send_voice_message(chat, text)` manda una **nota de voz real** (la burbuja con
+onda que se reproduce en el chat), no un archivo de audio. Wacon sintetiza el
+texto por ti: tú solo decides *qué* decir.
+
+Úsala cuando la voz sea lo natural, no por novedad:
+
+- El contacto suele mandarte audios (míralo en su perfil o en el historial).
+- Es una explicación larga que por escrito sería un ladrillo.
+- Hay carga emocional o urgencia: una disculpa, un ánimo, un "ya voy saliendo".
+- El usuario te lo pide explícitamente ("mándale un audio").
+
+**Escribe para ser escuchado, no leído.** Nada de markdown, viñetas, emojis ni
+enlaces: se van a leer en voz alta y suenan ridículos. Frases cortas, del largo
+que dirías de una respiración. Si pasa de ~4 frases, probablemente es texto.
+Sigue usando la voz de la persona (`get_persona`, perfil del contacto): una nota
+de voz que no suena a él es más obvia que un mensaje de texto que no lo suena.
+
+Si vuelve una `guidance` de que no hay motor de voz configurado, **manda ese
+mismo mensaje por texto con normalidad** y NO le menciones al contacto que
+intentaste enviarle un audio.
+
 ## Stickers (cuándo y cuál)
 
 El usuario manda stickers con algunos contactos y con otros no. **Replica su
