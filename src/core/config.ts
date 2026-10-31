@@ -13,6 +13,21 @@ const TranscriptionSchema = z.object({
   timeoutSeconds: z.number().int().min(5).max(300).default(60),
 });
 
+const TtsSchema = z.object({
+  /** none = Wacon cannot speak; send_voice_message degrades to "write it as text". */
+  backend: z.enum(["none", "openai-compatible"]).default("none"),
+  /** Full /audio/speech URL (OpenAI, Groq, or a local Kokoro/openedai-speech server). */
+  endpoint: z.string().optional(),
+  apiKey: z.string().optional(),
+  model: z.string().optional(),
+  /** Voice id as named by the backend (e.g. "nova", "alloy", a Kokoro voice). */
+  voice: z.string().optional(),
+  speed: z.number().min(0.25).max(4).default(1),
+  /** A voice note is meant to be short — longer text is rejected before spending API credit. */
+  maxChars: z.number().int().min(50).max(5000).default(1200),
+  timeoutSeconds: z.number().int().min(5).max(300).default(60),
+});
+
 const VisionSchema = z.object({
   /** none = return the native MCP image block for the agent's own vision. */
   backend: z.enum(["none", "openai-compatible"]).default("none"),
@@ -24,6 +39,7 @@ const VisionSchema = z.object({
 
 export type TranscriptionConfig = z.infer<typeof TranscriptionSchema>;
 export type VisionConfig = z.infer<typeof VisionSchema>;
+export type TtsConfig = z.infer<typeof TtsSchema>;
 
 const ConfigSchema = z.object({
   /** Simulation mode: sends are logged to sent_log but never hit WhatsApp. */
@@ -42,6 +58,14 @@ const ConfigSchema = z.object({
   transcription: TranscriptionSchema.default({}),
   /** Optional layer-2 image description (default: native image block). */
   vision: VisionSchema.default({}),
+  /** Optional text-to-speech so agents can reply with a real voice note. */
+  tts: TtsSchema.default({}),
+  /**
+   * ffmpeg, used to turn any audio into the ogg/opus WhatsApp needs and to draw
+   * the waveform. Optional: without it only already-opus audio can be sent.
+   * Leave unset to look it up on the PATH.
+   */
+  ffmpegPath: z.string().optional(),
   /** How often the proactive engine checks for due events (seconds). */
   proactivePollSeconds: z.number().int().min(15).max(600).default(45),
 });
