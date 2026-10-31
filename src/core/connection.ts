@@ -1,5 +1,4 @@
 import makeWASocket, {
-  useMultiFileAuthState,
   makeCacheableSignalKeyStore,
   fetchLatestBaileysVersion,
   DisconnectReason,
@@ -17,6 +16,7 @@ import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import pino from "pino";
 import { AUTH_DIR, ensureDirs } from "./paths.js";
+import { useWaconAuthState } from "./auth-state.js";
 import type { Store, MessageRow, MediaRow } from "./store.js";
 
 const MEDIA_KINDS = ["image", "audio", "video", "document", "sticker"] as const;
@@ -119,10 +119,27 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
    * one it was just replaced by (relogin's QR turning back into "disconnected").
    */
   private generation = 0;
+  /**
+   * The pending backoff reconnect. It must be cancellable: a timer armed by an
+   * earlier close used to fire after relogin()/logout() and spin up a SECOND
+   * socket, invalidating the QR being scanned (or reviving a logged-out session).
+   */
+  private reconnectTimer: NodeJS.Timeout | null = null;
+
+  private cancelReconnect(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
 
   state: ConnectionState = "disconnected";
   latestQr: string | null = null;
   selfJid: string | null = null;
+  /**
+   * Last credential read/write problem, surfaced by `wacon doctor`. A live
+   * socket keeps working on creds it already loaded, so this is the only
+   * warning the user gets that the session will not survive a restart.
+   */
+  lastAuthError: string | null = null;
 
   /** Bounded LRU of recent full messages, keyed "chat|id" — the fast path for media download. */
   private recentMessages = new Map<string, WAMessage>();
@@ -140,12 +157,19 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
 
   async start(): Promise<void> {
     ensureDirs();
+    this.cancelReconnect();
     this.stopped = false;
     const generation = ++this.generation;
     this.setState("connecting");
 
     const logger = pino({ level: "silent" });
-    const { state: authState, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { state: authState, saveCreds, corruption } = await useWaconAuthState(AUTH_DIR);
+    if (corruption) {
+      // Never let this pass quietly: silent credential loss is precisely what
+      // made the last outage look like WhatsApp had unlinked the account.
+      this.lastAuthError = corruption;
+      console.error(`[wacon] credenciales: ${corruption}`);
+    }
     const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined as unknown as [number, number, number] }));
 
     const socket = makeWASocket({
@@ -161,7 +185,19 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
     });
     this.socket = socket;
 
-    socket.ev.on("creds.update", saveCreds);
+    // A failed credential write used to reject straight into the event loop and
+    // take the whole daemon down (the ENOSPC crash). Catching it keeps the live
+    // socket — and everything already synced — alive while we flag the problem.
+    socket.ev.on("creds.update", () => {
+      void saveCreds()
+        .then(() => {
+          this.lastAuthError = null;
+        })
+        .catch((err: unknown) => {
+          this.lastAuthError = err instanceof Error ? err.message : String(err);
+          console.error(`[wacon] no se pudo guardar la sesión: ${this.lastAuthError}`);
+        });
+    });
 
     socket.ev.on("connection.update", (update) => {
       if (generation !== this.generation) return; // superseded socket, ignore
@@ -190,7 +226,12 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
         // Reconnect with exponential backoff, capped at 60s.
         const delay = Math.min(60_000, 2_000 * 2 ** this.reconnectAttempts++);
         this.setState("connecting");
-        setTimeout(() => void this.start().catch(() => this.setState("disconnected")), delay);
+        this.cancelReconnect();
+        this.reconnectTimer = setTimeout(() => {
+          this.reconnectTimer = null;
+          if (this.stopped || generation !== this.generation) return;
+          void this.start().catch(() => this.setState("disconnected"));
+        }, delay);
       }
     });
 
@@ -261,13 +302,20 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
       }
     });
 
-    socket.ev.on("messages.upsert", ({ messages }) => {
+    socket.ev.on("messages.upsert", ({ messages, type }) => {
       for (const msg of messages) {
         this.captureAltMapping(msg);
         const row = this.toRow(msg);
         if (!row) continue;
         this.store.insertMessage(row);
         this.store.upsertChat({ jid: row.chat_jid, lastMessageTs: row.timestamp });
+        // Only live arrivals ("notify") count; "append" is backfill of
+        // messages the phone already knew about. Answering from any device
+        // reads the chat, so an outgoing message clears the badge.
+        if (type === "notify") {
+          if (row.from_me) this.store.clearUnread(row.chat_jid);
+          else this.store.bumpUnread(row.chat_jid);
+        }
         if (msg.pushName && row.sender_jid && !row.from_me) {
           this.store.upsertContact({ jid: row.sender_jid, notifyName: msg.pushName });
         }
@@ -544,6 +592,7 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
     const sessionIsGone = this.state === "logged_out" || !existsSync(join(AUTH_DIR, "creds.json"));
 
     this.stopped = true;
+    this.cancelReconnect();
     try {
       this.socket?.end(undefined);
     } catch {
@@ -564,6 +613,7 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
 
   async logout(): Promise<void> {
     this.stopped = true;
+    this.cancelReconnect();
     try {
       await this.socket?.logout();
     } catch {
@@ -576,6 +626,7 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.cancelReconnect();
     this.socket?.end(undefined);
     this.setState("disconnected");
   }
