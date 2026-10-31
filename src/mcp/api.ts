@@ -6,7 +6,7 @@ import type { WatchWindowSuggestion } from "../core/activity.js";
 import type { ContactProfile, ProfileSection } from "../memory/profiles.js";
 import type { StyleStats } from "../memory/analyzer.js";
 import type { ConnectionState } from "../core/connection.js";
-import type { FactRow, EventRow, TaskRow, ErrorRow } from "../core/store.js";
+import type { FactRow, EventRow, TaskRow, ErrorRow, ChatOverviewRow } from "../core/store.js";
 import type { FactCategory } from "../memory/facts.js";
 import type { PlaybookResult } from "../knowledge/notebook.js";
 import type { DoctorReport } from "../core/doctor.js";
@@ -47,6 +47,8 @@ export interface WaconApi {
   /** Restart the WhatsApp socket so a new QR is produced (CLI `wacon login`). */
   relogin(): Promise<{ state: ConnectionState }>;
   listChats(limit?: number): Promise<unknown[]>;
+  /** Chat list rows with last-message preview — what a WhatsApp-style UI renders. */
+  chatOverview(limit?: number): Promise<ChatOverviewRow[]>;
   readMessages(chat: string, limit?: number, beforeTs?: number): Promise<MessageRow[]>;
   searchMessages(query: string, chat?: string, limit?: number): Promise<(MessageRow & { snippet: string })[]>;
   recall(query: string, chat?: string, limit?: number): Promise<RecallResult>;
@@ -118,6 +120,7 @@ export interface WaconApi {
   listStickers(opts?: { mood?: string; chat?: string; limit?: number }): Promise<unknown>;
   sendSticker(chat: string, stickerId: string, clientName: string): Promise<SendResult | Guided>;
   sendFile(chat: string, filePath: string, opts?: { caption?: string; asVoiceNote?: boolean; clientName?: string }): Promise<(SendResult & { kind?: string; fileName?: string }) | Guided>;
+  sendVoice(chat: string, text: string, opts?: { clientName?: string }): Promise<(SendResult & { seconds?: number; transcoded?: boolean }) | Guided>;
   logout(): Promise<void>;
 }
 
@@ -129,6 +132,7 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
     qr: async () => service.qr(),
     relogin: () => service.relogin(),
     listChats: async (limit) => service.listChats(limit),
+    chatOverview: async (limit) => service.chatOverview(limit),
     readMessages: async (chat, limit, beforeTs) => service.readMessages(chat, limit, beforeTs),
     searchMessages: async (query, chat, limit) => service.searchMessages(query, chat, limit),
     recall: async (query, chat, limit) => service.recall(query, chat, limit),
@@ -191,6 +195,7 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
     listStickers: async (opts) => service.listStickers(opts),
     sendSticker: (chat, stickerId, clientName) => service.sendSticker(chat, stickerId, clientName),
     sendFile: (chat, filePath, opts) => service.sendFile(chat, filePath, opts),
+    sendVoice: (chat, text, opts) => service.sendVoice(chat, text, opts),
     logout: () => service.logout(),
   };
 }
