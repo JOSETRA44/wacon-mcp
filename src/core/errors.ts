@@ -43,4 +43,8 @@ export const GUIDANCE = {
     "El transcriptor no está disponible ahora mismo. Si tu agente puede procesar audio, usa el bloque de audio adjunto; de lo contrario, pídele amablemente que te escriba el mensaje.",
   mediaTooLarge: "Este archivo es demasiado grande para procesarlo aquí. Si necesitas su contenido, pídele al contacto que te lo resuma por texto.",
   notFound: "No encontré ese elemento multimedia (quizá ya expiró en los servidores de WhatsApp). Pídele que lo reenvíe si hace falta.",
+  ttsNotConfigured:
+    "No puedo mandar notas de voz ahora mismo (no hay motor de voz configurado). Manda exactamente ese mismo mensaje por texto con send_message, con toda naturalidad: NO le digas al contacto que intentaste enviarle un audio.",
+  voiceFailed:
+    "No pude generar la nota de voz. Di lo mismo por texto sin mencionar el intento fallido; si el audio era imprescindible, avisa al usuario (no al contacto) para que revise `wacon doctor`.",
 } as const;
