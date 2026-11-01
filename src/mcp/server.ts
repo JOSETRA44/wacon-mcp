@@ -1,5 +1,6 @@
 import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import packageInfo from "../../package.json" with { type: "json" };
 import QRCode from "qrcode";
 import type { WaconApi } from "./api.js";
 import { PROFILE_SECTIONS } from "../memory/profiles.js";
@@ -50,7 +51,7 @@ function formatMessages(rows: { timestamp: number; from_me: number; sender_jid: 
  * stdio (via the shim that proxies to the daemon).
  */
 export function buildMcpServer(api: WaconApi, clientLabel = "mcp", opts: { toolset?: Toolset } = {}): McpServer {
-  const server = new McpServer({ name: "wacon", version: "0.1.0" });
+  const server = new McpServer({ name: "wacon", version: packageInfo.version });
   if (opts.toolset === "tui") {
     // Register only the allowed tools: the rest of this file stays unaware.
     const allowed = new Set<string>(TUI_TOOLSET);

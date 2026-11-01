@@ -1,4 +1,5 @@
 import { Command } from "commander";
+import packageInfo from "../package.json" with { type: "json" };
 import qrcodeTerminal from "qrcode-terminal";
 import { configureOutput, emit, fail, isJsonMode, c as pc } from "./cli/output.js";
 import { DaemonClient } from "./daemon/client.js";
@@ -25,7 +26,7 @@ const die = fail;
 program
   .name("wacon")
   .description("WhatsApp AI CLI + MCP server — manage WhatsApp from the terminal and let AI agents do it in your voice")
-  .version("0.1.0")
+  .version(packageInfo.version)
   // Agent-facing flags: --json gives machine-readable output with zero ANSI.
   .option("--json", "machine-readable output (for agents/scripts)", false)
   .option("--no-color", "disable colour output")
