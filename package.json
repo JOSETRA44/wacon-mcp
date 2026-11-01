@@ -61,6 +61,7 @@
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "react": "^19.3.1",
+    "sixel": "^0.16.0",
     "string-width": "^8.3.0",
     "zod": "^3.24.0"
   },
@@ -76,5 +77,8 @@
     "tsup": "^8.4.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
+  },
+  "optionalDependencies": {
+    "sharp": "^0.35.3"
   }
 }
