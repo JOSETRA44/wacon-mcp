@@ -4,21 +4,71 @@ import { tmpdir } from "node:os";
 import type { DaemonClient } from "../../daemon/client.js";
 import { openWithSystemViewer } from "../../cli/chat-core.js";
 import type { MessageKind } from "../domain/message.js";
-import type { ChatGateway, LinkState, Presence, SendOutcome } from "../application/ports.js";
+import { profileNotes, styleSentence, type Commitment } from "../domain/contact.js";
+import type { AgendaGateway, ContactInfoPort, ChatGateway, LinkState, Presence, SearchHit, SendOutcome, StickerOption } from "../application/ports.js";
 
 /**
  * Adapter: the app's ChatGateway port implemented over the Wacon daemon's
  * RPC client. Translation only — daemon shapes in, app shapes out — so the
  * controller never sees `Guided`, `SendResult` or base64 payloads.
  */
-export class DaemonGateway implements ChatGateway {
+export class DaemonGateway implements ChatGateway, AgendaGateway, ContactInfoPort {
   private static readonly CLIENT = "cli-ultra";
 
   constructor(private readonly client: DaemonClient) {}
 
+  // ── what Wacon knows ──
+  async contactInfo(chatJid: string) {
+    const b = await this.client.getProfile(chatJid);
+    return {
+      facts: b.facts.map((f) => ({ category: f.category, fact: f.fact })),
+      tags: b.tags,
+      notes: profileNotes(b.profile?.body),
+      style: styleSentence(b.profile?.stats as Record<string, unknown> | null | undefined),
+    };
+  }
+  async commitments(): Promise<Commitment[]> {
+    const rows = (await this.client.commitments(21)) as { chat: string; name: string | null; text: string; ageDays: number }[];
+    return rows.map((c) => ({ chatJid: c.chat, name: c.name, text: c.text, ageDays: c.ageDays }));
+  }
+
+  // ── Agenda ──
+  async agenda(withinDays: number) {
+    const [events, tasks, staleSuggestions, commitments] = await Promise.all([this.client.listEvents({ withinDays }), this.client.listTasks(false), this.client.staleSuggestionCount(), this.commitments().catch(() => [])]);
+    return {
+      events: events.map((e) => ({ id: e.id, title: e.title, startTs: e.start_ts, chatJid: e.chat_jid, status: e.status, notes: e.notes })),
+      tasks: tasks.map((t) => ({ id: t.id, title: t.title, dueTs: t.due_ts, chatJid: t.chat_jid, notes: t.notes })),
+      staleSuggestions,
+      commitments,
+    };
+  }
+  async scheduleEvent(input: { title: string; start: string; chat?: string; notes?: string }) {
+    await this.client.scheduleEvent({ ...input, notifyBeforeMinutes: 60 });
+  }
+  async addTask(input: { title: string; due?: string; chat?: string; notes?: string }) {
+    await this.client.addTask(input);
+  }
+  async completeEvent(id: number) {
+    await this.client.completeEvent(id);
+  }
+  async cancelEvent(id: number) {
+    await this.client.cancelEvent(id);
+  }
+  async completeTask(id: number) {
+    await this.client.completeTask(id);
+  }
+  async dismissStaleSuggestions() {
+    return (await this.client.dismissStaleSuggestions()).dismissed;
+  }
+
   async linkState() {
     const s = await this.client.status();
-    return { state: s.state as LinkState, selfName: null };
+    return {
+      state: s.state as LinkState,
+      selfName: null,
+      selfJids: [s.selfJid, s.selfLid].filter((j): j is string => !!j),
+      health: { authError: s.authError ?? null, freeDiskBytes: s.freeDiskBytes ?? null },
+    };
   }
   async relink() {
     return (await this.client.relogin()).state as LinkState;
@@ -45,8 +95,22 @@ export class DaemonGateway implements ChatGateway {
     return { status: p.status, lastSeenRelative: p.lastSeenRelative };
   }
 
-  async sendText(chatJid: string, text: string): Promise<SendOutcome> {
-    const r = await this.client.send(chatJid, text, DaemonGateway.CLIENT);
+  async reactions(chatJid: string, messageIds: string[]) {
+    const rows = await this.client.messageReactions(chatJid, messageIds);
+    return rows.map((r) => ({ targetId: r.target_id, senderJid: r.sender_jid, fromMe: r.from_me === 1, emoji: r.emoji }));
+  }
+  async react(chatJid: string, messageId: string, emoji: string): Promise<SendOutcome> {
+    const r = await this.client.react(chatJid, messageId, emoji, DaemonGateway.CLIENT);
+    return r.sent ? { ok: true, messageId: r.messageId } : { ok: false, reason: r.reason ?? "bloqueado" };
+  }
+  messageStatuses(ids: string[]) {
+    return this.client.messageStatuses(ids);
+  }
+  messagesByIds(chatJid: string, ids: string[]) {
+    return this.client.messagesByIds(chatJid, ids);
+  }
+  async sendText(chatJid: string, text: string, replyTo?: string): Promise<SendOutcome> {
+    const r = await this.client.send(chatJid, text, DaemonGateway.CLIENT, 0, replyTo);
     return r.sent ? { ok: true, messageId: r.messageId } : { ok: false, reason: r.reason ?? (r.dryRun ? "modo prueba (dryRun)" : "bloqueado") };
   }
   async sendFile(chatJid: string, path: string, caption?: string) {
@@ -59,12 +123,42 @@ export class DaemonGateway implements ChatGateway {
     await this.client.markRead(chatJid, 10);
   }
 
+  async search(chatJid: string, query: string, limit: number): Promise<SearchHit[]> {
+    const hits = await this.client.searchMessages(query, chatJid, limit);
+    return hits.map((h) => ({ id: h.id, chatJid: h.chat_jid, ts: h.timestamp, fromMe: h.from_me === 1, senderJid: h.sender_jid, snippet: h.snippet }));
+  }
+  async stickerMoods(): Promise<string[]> {
+    const r = (await this.client.listStickers({ limit: 1 })) as { moods?: string[] };
+    return r.moods ?? [];
+  }
+  async stickers(chatJid: string, mood: string, limit: number): Promise<StickerOption[]> {
+    const r = (await this.client.listStickers({ mood, chat: chatJid, limit })) as { stickers?: { id: string; description?: string | null }[] };
+    return (r.stickers ?? []).map((s) => ({ id: s.id, description: s.description ?? null }));
+  }
+  async sendSticker(chatJid: string, stickerId: string): Promise<SendOutcome> {
+    const r = await this.client.sendSticker(chatJid, stickerId, DaemonGateway.CLIENT);
+    if ("guidance" in r) return { ok: false, reason: r.guidance };
+    return r.sent ? { ok: true, messageId: r.messageId } : { ok: false, reason: r.reason ?? "bloqueado" };
+  }
+  async sendVoice(chatJid: string, text: string) {
+    const r = await this.client.sendVoice(chatJid, text, { clientName: DaemonGateway.CLIENT });
+    if ("guidance" in r) return { ok: false as const, reason: r.guidance };
+    if (!r.sent) return { ok: false as const, reason: r.reason ?? "bloqueado" };
+    return { ok: true as const, messageId: r.messageId, seconds: r.seconds };
+  }
+
   async waitForMessages(cursor: number, timeoutSeconds: number) {
     const r = await this.client.waitForMessages({ since: cursor, timeoutSeconds });
     return { cursor: r.cursor, events: r.events };
   }
   async currentCursor() {
     return (await this.client.status()).cursor;
+  }
+
+  async fetchMedia(chatJid: string, messageId: string) {
+    const res = await this.client.viewImage(chatJid, messageId);
+    if ("guidance" in res) throw new Error(res.guidance);
+    return { data: new Uint8Array(Buffer.from(res.base64, "base64")), mimetype: res.mimetype };
   }
 
   /**

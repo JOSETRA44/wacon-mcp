@@ -1,9 +1,10 @@
-import { byRecency, foldIdentities, matchesQuery, toSummary, type ChatSummary } from "../domain/chat.js";
-import { cleanText, kindOf, mergeMessages, type ChatMessage, type MessageKind } from "../domain/message.js";
+import { byRecency, foldIdentities, markSelf, matchesQuery, toSummary, type ChatSummary } from "../domain/chat.js";
+import { advanceDelivery, cleanText, deliveryFromAck, kindOf, mergeMessages, type ChatMessage, type MessageKind, type RawReaction } from "../domain/message.js";
 import { fileNameOf } from "../domain/input.js";
 import { shouldNotify } from "../domain/notify.js";
 import { isInvisibleMessage } from "../../core/message-types.js";
-import type { ChatGateway, IncomingEvent, LinkState, Presence, RawMessage } from "./ports.js";
+import type { ChatGateway, Health, IncomingEvent, LinkInfo, LinkState, Presence, PreferencesPort, RawMessage, SearchHit } from "./ports.js";
+import { DEFAULT_PREFERENCES, sanitizePreferences, type Preferences } from "../domain/preferences.js";
 
 /**
  * The app's use cases and its single source of state. Presentation reads the
@@ -23,6 +24,10 @@ export interface ConversationState {
   unreadAtOpen: number;
   memberNames: Record<string, string>;
   presence: Presence | null;
+  /** Messages fetched only because something visible quotes them. */
+  quoted: Record<string, ChatMessage>;
+  /** Individual reactions on loaded messages; the view groups them into pills. */
+  reactions: RawReaction[];
 }
 
 export interface Banner {
@@ -50,6 +55,9 @@ export interface UltraState {
   /** Label of the slow operation in flight ("enviando foto.jpg"), for the spinner. */
   busy: string | null;
   notice: Notice | null;
+  prefs: Preferences;
+  /** Daemon problems that put messages at risk (full disk, unsaved session). */
+  health: Health | null;
 }
 
 const PAGE = 40;
@@ -67,7 +75,11 @@ export class UltraController {
     banner: null,
     busy: null,
     notice: null,
+    prefs: DEFAULT_PREFERENCES,
+    health: null,
   };
+  /** Our own identities — the chat with yourself is shown as "Tú". */
+  private selfJids: string[] = [];
   private listeners = new Set<() => void>();
   private running = false;
   private cursor = 0;
@@ -75,12 +87,30 @@ export class UltraController {
   private localSeq = 0;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private receiptsTimer: ReturnType<typeof setInterval> | null = null;
   private lastNotified = new Map<string, number>();
 
   constructor(
     private readonly gw: ChatGateway,
-    private readonly now: () => number = Date.now
-  ) {}
+    private readonly now: () => number = Date.now,
+    private readonly prefsStore: PreferencesPort | null = null
+  ) {
+    if (prefsStore) this.state = { ...this.state, prefs: prefsStore.load() };
+  }
+
+  /** Change look-and-feel live; persisted immediately so it survives restarts. */
+  setPreferences(patch: Partial<Preferences>): void {
+    const prefs = sanitizePreferences({ ...this.state.prefs, ...patch });
+    this.set({ prefs });
+    try {
+      this.prefsStore?.save(prefs);
+    } catch (e) {
+      this.notify(`No pude guardar la apariencia: ${errText(e)}`, "error");
+    }
+  }
+  preferencesLocation(): string | null {
+    return this.prefsStore?.location() ?? null;
+  }
 
   // ── store plumbing ───────────────────────────────────────
   getState = (): UltraState => this.state;
@@ -129,8 +159,14 @@ export class UltraController {
     void this.feed();
     // The live feed only carries INCOMING messages; this catches what you
     // send from the phone and the trickle of a fresh history sync.
-    this.pollTimer = setInterval(() => this.scheduleRefresh(0), 20_000);
+    this.pollTimer = setInterval(() => {
+      this.scheduleRefresh(0);
+      void this.probe().catch(() => undefined); // keeps the disk/session warning current
+    }, 20_000);
     this.pollTimer.unref?.();
+    // Receipts trickle in after a send; a tiny poll keeps ✓ → ✓✓ → blue live.
+    this.receiptsTimer = setInterval(() => void this.refreshReceipts(), 4_000);
+    this.receiptsTimer.unref?.();
     if (initialQuery) {
       const hit = this.state.chats.find((c) => matchesQuery(c, initialQuery));
       if (hit) await this.openChat(hit.jid);
@@ -141,7 +177,9 @@ export class UltraController {
   stop(): void {
     this.running = false;
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
+    if (this.reactionsTimer) clearTimeout(this.reactionsTimer);
     if (this.pollTimer) clearInterval(this.pollTimer);
+    if (this.receiptsTimer) clearInterval(this.receiptsTimer);
   }
 
   /**
@@ -150,7 +188,7 @@ export class UltraController {
    */
   async ensureLinked(): Promise<boolean> {
     try {
-      const { state, selfName } = await this.gw.linkState();
+      const { state, selfName } = await this.probe();
       this.set({ selfName });
       if (state === "connected") {
         this.set({ link: { phase: "ready", state, qr: null, error: null } });
@@ -161,7 +199,7 @@ export class UltraController {
         this.set({ link: { phase: "checking", state, qr: null, error: null } });
         for (let i = 0; i < 20 && this.running; i++) {
           await sleep(500);
-          const r = await this.gw.linkState();
+          const r = await this.probe();
           if (r.state === "connected") {
             this.set({ link: { phase: "ready", state: r.state, qr: null, error: null }, selfName: r.selfName });
             return true;
@@ -174,7 +212,7 @@ export class UltraController {
       while (this.running) {
         const r = await this.gw.qr();
         if (r.state === "connected") {
-          const who = await this.gw.linkState().catch(() => ({ selfName: null }));
+          const who = await this.probe().catch(() => ({ selfName: null }));
           this.set({ link: { phase: "ready", state: r.state, qr: null, error: null }, selfName: who.selfName });
           this.notify("WhatsApp vinculado · el historial se sincroniza en segundo plano", "success");
           return true;
@@ -189,11 +227,22 @@ export class UltraController {
     }
   }
 
+  /** Ask the daemon who we are and how healthy it is; every link check goes through here. */
+  private async probe(): Promise<LinkInfo> {
+    const info = await this.gw.linkState();
+    if (info.selfJids?.length) this.selfJids = info.selfJids;
+    if (info.health) {
+      const prev = this.state.health;
+      if (prev?.authError !== info.health.authError || prev?.freeDiskBytes !== info.health.freeDiskBytes) this.set({ health: info.health });
+    }
+    return info;
+  }
+
   // ── chat list ────────────────────────────────────────────
   async refreshChats(): Promise<void> {
     try {
       const rows = await this.gw.overview(200);
-      const chats = foldIdentities(rows.map(toSummary)).sort(byRecency);
+      const chats = markSelf(foldIdentities(rows.map(toSummary)), this.selfJids).sort(byRecency);
       // The chat being read never shows a badge.
       const open = this.state.openJid;
       for (const c of chats) if (c.jid === open || (open && c.aliases.includes(open))) c.unread = 0;
@@ -202,6 +251,15 @@ export class UltraController {
       this.set({ chatsLoaded: true });
       this.notify(`No pude cargar los chats: ${errText(e)}`, "error");
     }
+  }
+
+  private reactionsTimer: ReturnType<typeof setTimeout> | null = null;
+  private scheduleReactions(jid: string): void {
+    if (this.reactionsTimer) clearTimeout(this.reactionsTimer);
+    this.reactionsTimer = setTimeout(() => {
+      this.reactionsTimer = null;
+      void this.refreshReactions(jid);
+    }, 300);
   }
 
   /** One refresh per burst of events instead of one per message. */
@@ -244,6 +302,62 @@ export class UltraController {
     }
     void this.gw.markRead(chat.jid).catch(() => undefined);
     if (!chat.isGroup) void this.refreshPresence(chat.jid);
+    void this.resolveQuotes(chat.jid);
+    void this.refreshReactions(chat.jid);
+  }
+
+  /** Load the reactions for everything currently loaded in a chat. */
+  async refreshReactions(jid: string): Promise<void> {
+    const convo = this.state.conversations[jid];
+    const ids = (convo?.messages ?? []).filter((m) => !m.id.startsWith("local-")).map((m) => m.id);
+    if (!convo || ids.length === 0) return;
+    try {
+      const reactions = await this.gw.reactions(jid, ids);
+      if (this.state.conversations[jid]) this.patchConvo(jid, { reactions });
+    } catch {
+      // reactions are decoration; a failure just leaves the bubbles bare
+    }
+  }
+
+  /**
+   * React (or un-react: choosing your current emoji again removes it), shown
+   * instantly and rolled back if WhatsApp refuses.
+   */
+  async react(messageId: string, emoji: string): Promise<void> {
+    const jid = this.state.openJid;
+    const convo = jid ? this.state.conversations[jid] : undefined;
+    if (!jid || !convo) return;
+    const before = convo.reactions;
+    const mine = before.find((r) => r.targetId === messageId && r.fromMe);
+    const next = mine?.emoji === emoji ? "" : emoji;
+    const others = before.filter((r) => !(r.targetId === messageId && r.fromMe));
+    this.patchConvo(jid, { reactions: next ? [...others, { targetId: messageId, senderJid: null, fromMe: true, emoji: next }] : others });
+    const r = await this.gw.react(jid, messageId, next).catch((e: unknown) => ({ ok: false as const, reason: errText(e) }));
+    if (!r.ok) {
+      this.patchConvo(jid, { reactions: before });
+      this.notify(`No se pudo reaccionar: ${r.reason}`, "error");
+    }
+  }
+
+  /**
+   * A reply can quote something from weeks ago that is not loaded. Fetch just
+   * those messages (once) so the quote block shows real text, not "…".
+   */
+  async resolveQuotes(jid: string): Promise<void> {
+    const convo = this.state.conversations[jid];
+    if (!convo) return;
+    const have = new Set(convo.messages.map((m) => m.id));
+    const missing = [...new Set(convo.messages.map((m) => m.quotedId).filter((q): q is string => !!q && !have.has(q) && !convo.quoted[q]))];
+    if (missing.length === 0) return;
+    try {
+      const rows = await this.gw.messagesByIds(jid, missing);
+      const found: Record<string, ChatMessage> = {};
+      for (const r of rows) found[r.id] = fromRaw(r, jid);
+      const cur = this.state.conversations[jid];
+      if (cur) this.patchConvo(jid, { quoted: { ...cur.quoted, ...found } });
+    } catch {
+      // a missing quote degrades to "Mensaje citado" — never an error
+    }
   }
 
   closeChat(): void {
@@ -268,6 +382,8 @@ export class UltraController {
       const older = await this.fetchMessages(chat, PAGE, convo.messages[0]!.ts);
       const current = this.state.conversations[chat.jid]?.messages ?? [];
       this.patchConvo(chat.jid, { messages: mergeMessages(current, older), loadingOlder: false, hasMore: older.length >= PAGE });
+      void this.resolveQuotes(chat.jid);
+      void this.refreshReactions(chat.jid);
     } catch (e) {
       this.patchConvo(chat.jid, { loadingOlder: false });
       this.notify(`No pude cargar mensajes anteriores: ${errText(e)}`, "error");
@@ -293,14 +409,14 @@ export class UltraController {
    * tick or an error. Waiting for the network before drawing anything is the
    * single biggest reason a chat UI feels sluggish.
    */
-  async sendText(text: string): Promise<void> {
+  async sendText(text: string, replyTo?: string): Promise<void> {
     const chat = this.currentChat();
     const body = text.trim();
     if (!chat || !body) return;
-    const local = this.addLocal(chat.jid, { text: body, kind: "text" });
+    const local = this.addLocal(chat.jid, { text: body, kind: "text", quotedId: replyTo ?? null });
     this.setDraft(chat.jid, "");
     this.bump(chat.jid, { text: body, kind: "text" });
-    const r = await this.gw.sendText(chat.jid, body).catch((e: unknown) => ({ ok: false as const, reason: errText(e) }));
+    const r = await this.gw.sendText(chat.jid, body, replyTo).catch((e: unknown) => ({ ok: false as const, reason: errText(e) }));
     this.settle(chat.jid, local.id, r);
   }
 
@@ -327,7 +443,7 @@ export class UltraController {
     const m = jid ? this.state.conversations[jid]?.messages.find((x) => x.id === localId) : undefined;
     if (!jid || !m || m.status !== "failed" || m.kind !== "text") return;
     this.updateMessage(jid, localId, { status: "pending", error: undefined });
-    const r = await this.gw.sendText(jid, m.text).catch((e: unknown) => ({ ok: false as const, reason: errText(e) }));
+    const r = await this.gw.sendText(jid, m.text, m.quotedId ?? undefined).catch((e: unknown) => ({ ok: false as const, reason: errText(e) }));
     this.settle(jid, localId, r);
   }
 
@@ -338,8 +454,8 @@ export class UltraController {
     return null;
   }
 
-  private addLocal(jid: string, p: { text: string; kind: MessageKind }): ChatMessage {
-    const m: ChatMessage = { id: `local-${++this.localSeq}`, chatJid: jid, senderJid: null, fromMe: true, ts: this.now(), text: p.text, kind: p.kind, status: "pending" };
+  private addLocal(jid: string, p: { text: string; kind: MessageKind; quotedId?: string | null }): ChatMessage {
+    const m: ChatMessage = { id: `local-${++this.localSeq}`, chatJid: jid, senderJid: null, fromMe: true, ts: this.now(), text: p.text, kind: p.kind, status: "pending", quotedId: p.quotedId ?? null };
     const convo = this.state.conversations[jid] ?? emptyConvo();
     this.patchConvo(jid, { messages: [...convo.messages, m] });
     return m;
@@ -352,6 +468,39 @@ export class UltraController {
     } else {
       this.updateMessage(jid, localId, { status: "failed", error: r.reason });
       this.notify(`No se envió: ${r.reason} · Ctrl+R reintenta`, "error");
+    }
+  }
+
+  /**
+   * Move our recent messages in the open chat along ✓ → ✓✓ → blue. Only asks
+   * about messages still waiting on a receipt, so a quiet chat costs nothing.
+   */
+  async refreshReceipts(): Promise<void> {
+    const jid = this.state.openJid;
+    const convo = jid ? this.state.conversations[jid] : undefined;
+    if (!jid || !convo) return;
+    const since = this.now() - 24 * 3600_000;
+    const waiting = convo.messages
+      .filter((m) => m.fromMe && !m.id.startsWith("local-") && m.ts >= since && (m.status === "sent" || m.status === "delivered" || m.status === "pending"))
+      .slice(-30);
+    if (waiting.length === 0) return;
+    try {
+      const rows = await this.gw.messageStatuses(waiting.map((m) => m.id));
+      const next = new Map(rows.map((r) => [r.id, deliveryFromAck(r.status)]));
+      const latest = this.state.conversations[jid];
+      if (!latest) return;
+      let changed = false;
+      const messages = latest.messages.map((m) => {
+        const n = next.get(m.id);
+        if (!n || n === "failed") return m;
+        const status = advanceDelivery(m.status, n);
+        if (status === m.status) return m;
+        changed = true;
+        return { ...m, status };
+      });
+      if (changed) this.patchConvo(jid, { messages });
+    } catch {
+      // receipts are a nicety; the next tick retries
     }
   }
 
@@ -371,7 +520,107 @@ export class UltraController {
     });
   }
 
+  /** Voice note via TTS: the bubble shows at once, the duration once known. */
+  async sendVoice(text: string): Promise<void> {
+    const chat = this.currentChat();
+    const spoken = text.trim();
+    if (!chat || !spoken) return;
+    const local = this.addLocal(chat.jid, { text: "", kind: "voice" });
+    this.setDraft(chat.jid, "");
+    this.bump(chat.jid, { text: "", kind: "voice" });
+    const r = await this.busy("grabando nota de voz", () =>
+      this.gw.sendVoice(chat.jid, spoken).catch((e: unknown) => ({ ok: false as const, reason: errText(e) }))
+    );
+    if (r.ok && "seconds" in r && r.seconds) {
+      const s = Math.round(r.seconds);
+      this.updateMessage(chat.jid, local.id, { text: `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` });
+    }
+    this.settle(chat.jid, local.id, r);
+  }
+
+  private moodsCache: string[] | null = null;
+  async stickerMoods(): Promise<string[]> {
+    if (this.moodsCache) return this.moodsCache;
+    try {
+      this.moodsCache = await this.gw.stickerMoods();
+    } catch {
+      this.moodsCache = [];
+    }
+    return this.moodsCache;
+  }
+
+  /** Send the sticker that best fits a mood for THIS contact (the daemon ranks them). */
+  async sendSticker(mood: string): Promise<void> {
+    const chat = this.currentChat();
+    if (!chat) return;
+    try {
+      const [best] = await this.gw.stickers(chat.jid, mood, 1);
+      if (!best) {
+        this.notify(`No tienes stickers de "${mood}" todavía`, "info");
+        return;
+      }
+      const local = this.addLocal(chat.jid, { text: best.description ?? mood, kind: "sticker" });
+      this.bump(chat.jid, { text: "", kind: "sticker" });
+      const r = await this.busy("enviando sticker", () => this.gw.sendSticker(chat.jid, best.id).catch((e: unknown) => ({ ok: false as const, reason: errText(e) })));
+      this.settle(chat.jid, local.id, r);
+    } catch (e) {
+      this.notify(`No pude enviar el sticker: ${errText(e)}`, "error");
+    }
+  }
+
+  // ── search ───────────────────────────────────────────────
+  /** Search the open conversation (both halves of an @lid/phone pair). */
+  async searchConversation(query: string): Promise<SearchHit[]> {
+    const chat = this.currentChat();
+    const q = query.trim();
+    if (!chat || q.length < 2) return [];
+    try {
+      const lists = await Promise.all([chat.jid, ...chat.aliases].map((j) => this.gw.search(j, q, 30).catch(() => [] as SearchHit[])));
+      return lists.flat().sort((a, b) => b.ts - a.ts).slice(0, 30);
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Make sure a message is loaded so the view can scroll to it, paging back
+   * as needed. Bounded: a hit from years ago must not download the world.
+   */
+  async jumpTo(messageId: string, ts: number): Promise<boolean> {
+    const chat = this.currentChat();
+    if (!chat) return false;
+    const has = () => !!this.state.conversations[chat.jid]?.messages.some((m) => m.id === messageId);
+    for (let page = 0; page < 40 && !has(); page++) {
+      const convo = this.state.conversations[chat.jid];
+      const oldest = convo?.messages[0]?.ts;
+      if (!convo?.hasMore || (oldest !== undefined && oldest < ts - 1)) break;
+      await this.loadOlder();
+    }
+    if (!has()) this.notify("Ese mensaje es demasiado antiguo para mostrarlo aquí", "info");
+    return has();
+  }
+
   // ── media ────────────────────────────────────────────────
+  private imageCache = new Map<string, Uint8Array>();
+
+  /** Image bytes for the in-terminal viewer; small LRU so ←/→ browsing is instant. */
+  async loadImage(messageId: string): Promise<Uint8Array | null> {
+    const hit = this.imageCache.get(messageId);
+    if (hit) return hit;
+    const jid = this.state.openJid;
+    const m = jid ? this.state.conversations[jid]?.messages.find((x) => x.id === messageId) : undefined;
+    if (!m) return null;
+    try {
+      const { data } = await this.busy("descargando imagen", () => this.gw.fetchMedia(m.chatJid, m.id));
+      this.imageCache.set(messageId, data);
+      while (this.imageCache.size > 6) this.imageCache.delete(this.imageCache.keys().next().value!);
+      return data;
+    } catch (e) {
+      this.notify(`No pude descargar la imagen: ${errText(e)}`, "error");
+      return null;
+    }
+  }
+
   async openMedia(messageId: string): Promise<void> {
     const jid = this.state.openJid;
     const m = jid ? this.state.conversations[jid]?.messages.find((x) => x.id === messageId) : undefined;
@@ -414,6 +663,13 @@ export class UltraController {
 
   /** Exposed for tests; the feed loop calls it for every incoming message. */
   ingest(e: IncomingEvent): void {
+    // A reaction is invisible as a bubble but changes one: refresh the pills
+    // of the open chat (coalesced, a group can fire many at once).
+    if (e.type === "reaction") {
+      const open = this.currentChat();
+      if (open && (e.chat === open.jid || open.aliases.includes(e.chat))) this.scheduleReactions(open.jid);
+      return;
+    }
     if (isInvisibleMessage(e.type, e.text)) return;
     const open = this.currentChat();
     const isOpen = !!open && (e.chat === open.jid || open.aliases.includes(e.chat));
@@ -429,6 +685,7 @@ export class UltraController {
         kind,
         status: "received",
         arrivedAt: this.now(),
+        quotedId: e.quotedId ?? null,
       };
       const convo = this.state.conversations[open.jid] ?? emptyConvo();
       this.patchConvo(open.jid, { messages: mergeMessages(convo.messages, [msg]), presence: convo.presence?.status === "typing" ? { ...convo.presence, status: "online" } : convo.presence });
@@ -458,7 +715,7 @@ export class UltraController {
 }
 
 function emptyConvo(): ConversationState {
-  return { messages: [], loading: false, loadingOlder: false, hasMore: true, unreadAtOpen: 0, memberNames: {}, presence: null };
+  return { messages: [], loading: false, loadingOlder: false, hasMore: true, unreadAtOpen: 0, memberNames: {}, presence: null, quoted: {}, reactions: [] };
 }
 
 function fromRaw(r: RawMessage, _chat: string): ChatMessage {
@@ -471,7 +728,8 @@ function fromRaw(r: RawMessage, _chat: string): ChatMessage {
     ts: r.timestamp,
     text: cleanText(r.text, kind),
     kind,
-    status: r.from_me === 1 ? "sent" : "received",
+    status: r.from_me === 1 ? deliveryFromAck(r.status) : "received",
+    quotedId: r.quoted_id ?? null,
   };
 }
 

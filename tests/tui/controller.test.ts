@@ -22,9 +22,12 @@ class FakeGateway implements ChatGateway {
     return { state: this.state === "connected" ? ("connected" as const) : ("waiting_qr" as const), qr: q ?? null };
   }
   async overview() { return this.rows; }
-  async messages(jid: string) {
+  async messages(jid: string, _limit?: number, beforeTs?: number) {
     await new Promise((r) => setTimeout(r, this.delays[jid] ?? 0));
-    return this.history[jid] ?? [];
+    // Paged history: each older page is everything strictly before beforeTs.
+    const all = [...(this.history[jid] ?? []), ...(this.pages[jid] ?? []).flat()].sort((a, b) => b.timestamp - a.timestamp);
+    const older = beforeTs === undefined ? all : all.filter((m) => m.timestamp < beforeTs);
+    return older.slice(0, 40);
   }
   async memberNames() { return {}; }
   async presence() { return { status: "online" as const, lastSeenRelative: null }; }
@@ -35,6 +38,16 @@ class FakeGateway implements ChatGateway {
   async currentCursor() { return 0; }
   async openMedia() { return "ok"; }
   fileExists() { return true; }
+  searchHits: Record<string, { id: string; chatJid: string; ts: number; fromMe: boolean; senderJid: string | null; snippet: string }[]> = {};
+  async search(jid: string) { return this.searchHits[jid] ?? []; }
+  async stickerMoods() { return ["risa", "ok"]; }
+  stickerList: { id: string; description: string | null }[] = [];
+  async stickers() { return this.stickerList; }
+  sentStickers: string[] = [];
+  async sendSticker(_j: string, id: string) { this.sentStickers.push(id); return { ok: true as const, messageId: "st" }; }
+  voiceSeconds = 75;
+  async sendVoice() { return { ok: true as const, messageId: "v", seconds: this.voiceSeconds }; }
+  pages: Record<string, RawMessage[][]> = {};
 }
 
 const overview = (jid: string, ts: number, over: Partial<OverviewRow> = {}): OverviewRow => ({
@@ -144,6 +157,57 @@ describe("UltraController", () => {
     expect(gw.marked).toContain("a@s.whatsapp.net");
     c.ingest({ id: "in2", chat: "b@s.whatsapp.net", chatName: "b", from: "b@s.whatsapp.net", at: new Date().toISOString(), text: "oye", type: "text" });
     expect(c.getState().banner).toMatchObject({ chatJid: "b@s.whatsapp.net", text: "oye" });
+    c.stop();
+  });
+
+  it("search covers both halves of an @lid/phone pair, newest first", async () => {
+    const gw = new FakeGateway();
+    gw.rows = [overview("1@lid", 5, { alt_jid: "51@s.whatsapp.net" }), overview("51@s.whatsapp.net", 3, { alt_jid: "1@lid" })];
+    gw.searchHits = {
+      "1@lid": [{ id: "n", chatJid: "1@lid", ts: 9, fromMe: false, senderJid: null, snippet: "viaje nuevo" }],
+      "51@s.whatsapp.net": [{ id: "o", chatJid: "51@s.whatsapp.net", ts: 2, fromMe: true, senderJid: null, snippet: "viaje viejo" }],
+    };
+    const c = await started(gw);
+    await c.openChat("1@lid");
+    expect((await c.searchConversation("viaje")).map((h) => h.id)).toEqual(["n", "o"]);
+    expect(await c.searchConversation("v")).toEqual([]); // too short to be useful
+    c.stop();
+  });
+
+  it("jumping to an old hit pages back until it is loaded", async () => {
+    const gw = new FakeGateway();
+    gw.rows = [overview("a@s.whatsapp.net", 1000)];
+    // 120 messages: the first page (40) does not contain the target at ts=5.
+    gw.history = { "a@s.whatsapp.net": Array.from({ length: 120 }, (_, i) => raw("a@s.whatsapp.net", `m${i}`, i)) };
+    const c = await started(gw);
+    await c.openChat("a@s.whatsapp.net");
+    expect(c.getState().conversations["a@s.whatsapp.net"]!.messages.some((m) => m.id === "m5")).toBe(false);
+    expect(await c.jumpTo("m5", 5)).toBe(true);
+    expect(c.getState().conversations["a@s.whatsapp.net"]!.messages.some((m) => m.id === "m5")).toBe(true);
+    c.stop();
+  });
+
+  it("stickers: says so when a mood has none; sends the ranked best otherwise", async () => {
+    const gw = new FakeGateway();
+    gw.rows = [overview("a@s.whatsapp.net", 1)];
+    const c = await started(gw);
+    await c.openChat("a@s.whatsapp.net");
+    await c.sendSticker("risa");
+    expect(c.getState().notice?.text).toMatch(/No tienes stickers/);
+    gw.stickerList = [{ id: "own:1", description: "gato riendo" }];
+    await c.sendSticker("risa");
+    expect(gw.sentStickers).toEqual(["own:1"]);
+    expect(c.getState().conversations["a@s.whatsapp.net"]!.messages.at(-1)).toMatchObject({ kind: "sticker", status: "sent" });
+    c.stop();
+  });
+
+  it("voice notes show their real duration as m:ss once sent", async () => {
+    const gw = new FakeGateway();
+    gw.rows = [overview("a@s.whatsapp.net", 1)];
+    const c = await started(gw);
+    await c.openChat("a@s.whatsapp.net");
+    await c.sendVoice("hola, ya llegué");
+    expect(c.getState().conversations["a@s.whatsapp.net"]!.messages.at(-1)).toMatchObject({ kind: "voice", text: "1:15", status: "sent" });
     c.stop();
   });
 
