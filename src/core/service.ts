@@ -11,6 +11,9 @@ import { readPersona, writePersonaStats } from "../memory/persona.js";
 import { normalizeCategory, factGaps, renderFacts, type FactCategory } from "../memory/facts.js";
 import { consultPlaybook, type PlaybookResult } from "../knowledge/notebook.js";
 import { readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { freeDiskBytes } from "./auth-state.js";
+import { classifyLink, extractUrls, patternsFor, type LinkKind } from "./links.js";
 import { runDoctor, type DoctorReport } from "./doctor.js";
 import { ProactiveScheduler } from "./scheduler.js";
 import { AnalysisRunner, type AnalysisScope, type AnalysisJob } from "../analysis/runner.js";
@@ -19,7 +22,9 @@ import { pendingReplies, openCommitments } from "../analysis/productivity.js";
 import { logError, GUIDANCE, type Guided } from "./errors.js";
 import { fetchMedia } from "../media/media.js";
 import { transcribe } from "../media/transcription.js";
-import { prepareMedia, toMessageContent } from "../media/send-media.js";
+import { prepareMedia, stagingBytesNeeded, toMessageContent } from "../media/send-media.js";
+import { videoPreview } from "../media/video-meta.js";
+import { extname } from "node:path";
 import { synthesize } from "../media/tts.js";
 import { findFfmpeg, toVoiceNote, voiceNoteContent, formatDuration } from "../media/voice.js";
 import { importPack, indexOwnStickers, stickerAffinity, MOODS } from "../media/stickers.js";
@@ -39,10 +44,29 @@ function relativeTime(ts: number): string {
 export interface StatusInfo {
   state: ConnectionState;
   selfJid: string | null;
+  /** Our own @lid: the "message yourself" chat lives under it. */
+  selfLid: string | null;
+  /** Last failure saving the WhatsApp session (usually a full disk). */
+  authError: string | null;
+  /** Free bytes on the disk that holds Wacon's data and media temp files. */
+  freeDiskBytes: number | null;
   presence: string;
   activeWatches: number;
   cursor: number;
   stats: { chats: number; contacts: number; messages: number; outgoing: number };
+}
+
+export interface LinkHit {
+  id: string;
+  chat: string;
+  chatName: string | null;
+  isGroup: boolean;
+  at: number;
+  /** "me", the sender's name, or null when unknown. */
+  from: string | null;
+  kind: LinkKind;
+  urls: string[];
+  text: string;
 }
 
 export interface WaitResult {
@@ -56,6 +80,8 @@ export interface WaitResult {
     at: string;
     text: string | null;
     type: string;
+    /** Id of the message this one replies to, when it is a reply. */
+    quotedId: string | null;
     priority: number;
     reasons: string[];
   }[];
@@ -111,6 +137,9 @@ export class WaconService {
     return {
       state: this.connection.state,
       selfJid: this.connection.selfJid,
+      selfLid: this.connection.selfLid,
+      authError: this.connection.lastAuthError,
+      freeDiskBytes: freeDiskBytes(tmpdir()),
       presence: this.connection.presence,
       activeWatches: this.watch.activeSessions().length,
       cursor: this.watch.cursor,
@@ -224,6 +253,24 @@ export class WaconService {
     return { dismissed: this.store.setSuggestedStatus(id, "dismissed") };
   }
 
+  /**
+   * Suggestions older than `days` were never reviewed and their dates have
+   * passed or never existed (the first run left 152 like that): clear them
+   * in one go instead of one by one.
+   */
+  dismissStaleSuggestions(days = 14): { dismissed: number; remaining: number } {
+    const cutoff = Date.now() - days * 86_400_000;
+    const dismissed = this.store.db.prepare(`UPDATE suggested_events SET status = 'dismissed' WHERE status = 'suggested' AND created_at < ? AND (when_ts IS NULL OR when_ts < ?)`).run(cutoff, Date.now()).changes;
+    const remaining = (this.store.db.prepare(`SELECT COUNT(*) n FROM suggested_events WHERE status = 'suggested'`).get() as { n: number }).n;
+    return { dismissed, remaining };
+  }
+
+  /** How many suggestions are stale (what the Agenda offers to clear). */
+  staleSuggestionCount(days = 14): number {
+    const cutoff = Date.now() - days * 86_400_000;
+    return (this.store.db.prepare(`SELECT COUNT(*) n FROM suggested_events WHERE status = 'suggested' AND created_at < ? AND (when_ts IS NULL OR when_ts < ?)`).get(cutoff, Date.now()) as { n: number }).n;
+  }
+
   listChats(limit = 30) {
     return this.store.listChats(limit);
   }
@@ -232,12 +279,98 @@ export class WaconService {
     return this.store.chatOverview(limit);
   }
 
+  /**
+   * React to a message as the user. Outward-facing like any send, so the same
+   * guardrails (allow/deny lists, rate limit, dry-run) apply.
+   */
+  async react(chatJidOrPhone: string, messageId: string, emoji: string, clientName: string): Promise<SendResult> {
+    const chatJid = normalizeJid(chatJidOrPhone);
+    const check = checkSend(loadConfig(), this.store, chatJid);
+    if (!check.allowed) return { sent: false, dryRun: check.dryRun, messageId: null, reason: check.reason };
+    const target = this.store.messagesByIds([messageId], [chatJid])[0];
+    if (!target) return { sent: false, dryRun: check.dryRun, messageId: null, reason: "no encuentro ese mensaje" };
+    if (check.dryRun) {
+      this.store.logSent({ chatJid, text: `[reacción ${emoji || "quitada"}]`, clientName, dryRun: true });
+      return { sent: false, dryRun: true, messageId: null, reason: "dryRun activo — reacción registrada pero NO enviada" };
+    }
+    // Reactions address the chat that holds the target (it may be the other
+    // half of an @lid/phone pair).
+    const where = target.chat_jid;
+    const { id } = await this.connection.react(where, { id: target.id, fromMe: target.from_me === 1, participant: where.endsWith("@g.us") ? target.sender_jid : null }, emoji);
+    if (this.connection.selfJid) {
+      this.store.upsertReaction({ chatJid: where, targetId: target.id, senderJid: this.connection.selfJid, fromMe: true, emoji, timestamp: Date.now() });
+    }
+    this.store.logSent({ chatJid, text: `[reacción ${emoji || "quitada"}]`, clientName, dryRun: false });
+    return { sent: true, dryRun: false, messageId: id };
+  }
+
+  messageReactions(chatJid: string, ids: string[]) {
+    const jid = this.resolveChatJid(chatJid);
+    const twin = jid.endsWith("@lid") ? this.store.pnForLid(jid) : this.store.lidForPn(jid);
+    return this.store.reactionsFor(twin ? [jid, twin] : [jid], ids.slice(0, 500));
+  }
+
+  /** WhatsApp ack of our own messages (2 server, 3 delivered, 4 read). */
+  messageStatuses(ids: string[]): { id: string; status: number | null }[] {
+    return this.store.messageStatuses(ids.slice(0, 200));
+  }
+
+  messagesByIds(chatJid: string, ids: string[]): MessageRow[] {
+    return this.store.messagesByIds(ids.slice(0, 100), [this.resolveChatJid(chatJid)]);
+  }
+
   readMessages(chatJid: string, limit = 30, beforeTs?: number): MessageRow[] {
     return this.store.readMessages(this.resolveChatJid(chatJid), limit, beforeTs);
   }
 
-  searchMessages(query: string, chatJid?: string, limit = 20) {
-    return this.store.searchMessages(query, { chatJid: chatJid ? this.resolveChatJid(chatJid) : undefined, limit });
+  /** Results carry the chat's name: across chats, "where" is half the answer. */
+  searchMessages(query: string, chatJid?: string, limit = 20): (MessageRow & { snippet: string; chat_name: string | null })[] {
+    const rows = this.store.searchMessages(query, { chatJid: chatJid ? this.resolveChatJid(chatJid) : undefined, limit });
+    const name = this.nameCache();
+    return rows.map((r) => ({ ...r, chat_name: name(r.chat_jid) }));
+  }
+
+  /**
+   * Shared links and files of a kind (sheets, forms, docs…) across ALL chats
+   * or one, newest first — "¿dónde me mandaron el sheet para llenar?".
+   */
+  findLinks(opts: { kinds?: LinkKind[]; chat?: string; text?: string; days?: number; limit?: number } = {}): LinkHit[] {
+    const kinds = opts.kinds?.length ? opts.kinds : (["any"] as LinkKind[]);
+    let chatJids: string[] | undefined;
+    if (opts.chat) {
+      const jid = this.resolveChatJid(opts.chat);
+      const twin = jid.endsWith("@lid") ? this.store.pnForLid(jid) : this.store.lidForPn(jid);
+      chatJids = [jid, ...(twin ? [twin] : [])];
+    }
+    const rows = this.store.findLinks(patternsFor(kinds), {
+      chatJids,
+      text: opts.text,
+      sinceTs: opts.days ? Date.now() - opts.days * 86_400_000 : undefined,
+      limit: opts.limit ?? 30,
+    });
+    const name = this.nameCache();
+    return rows.map((r) => {
+      const urls = extractUrls(r.text);
+      return {
+        id: r.id,
+        chat: r.chat_jid,
+        chatName: name(r.chat_jid),
+        isGroup: r.chat_jid.endsWith("@g.us"),
+        at: r.timestamp,
+        from: r.from_me ? "me" : r.sender_jid ? (name(r.sender_jid) ?? r.sender_jid) : null,
+        kind: classifyLink(urls[0] ?? r.text ?? ""),
+        urls,
+        text: (r.text ?? "").slice(0, 280),
+      };
+    });
+  }
+
+  private nameCache(): (jid: string) => string | null {
+    const cache = new Map<string, string | null>();
+    return (jid) => {
+      if (!cache.has(jid)) cache.set(jid, this.store.resolveDisplayName(jid));
+      return cache.get(jid) ?? null;
+    };
   }
 
   /** Hybrid memory retrieval: keyword (BM25) + semantic (hashed vectors) + recency, RRF-fused, plus matching episode summaries. */
@@ -282,7 +415,7 @@ export class WaconService {
     };
   }
 
-  async send(chatJidOrPhone: string, text: string, clientName: string, typingMs = 0): Promise<SendResult> {
+  async send(chatJidOrPhone: string, text: string, clientName: string, typingMs = 0, replyTo?: string): Promise<SendResult> {
     const chatJid = normalizeJid(chatJidOrPhone);
     const config = loadConfig();
     const check = checkSend(config, this.store, chatJid);
@@ -293,7 +426,13 @@ export class WaconService {
       this.store.logSent({ chatJid, text, clientName, dryRun: true });
       return { sent: false, dryRun: true, messageId: null, reason: "dryRun is enabled in config.json — message logged but NOT sent" };
     }
-    const { id } = await this.connection.sendText(chatJid, text, typingMs);
+    // Quote only what we can actually find; an unknown id sends a plain message
+    // rather than failing — the words still matter more than the quote.
+    const q = replyTo ? this.store.messagesByIds([replyTo], [chatJid])[0] : undefined;
+    const quoted = q
+      ? { id: q.id, fromMe: q.from_me === 1, participant: chatJid.endsWith("@g.us") ? q.sender_jid : null, text: q.text }
+      : undefined;
+    const { id } = await this.connection.sendText(chatJid, text, typingMs, quoted);
     this.store.logSent({ chatJid, text, clientName, dryRun: false });
     return { sent: true, dryRun: false, messageId: id };
   }
@@ -333,6 +472,7 @@ export class WaconService {
         at: new Date(e.message.timestamp).toISOString(),
         text: e.message.text,
         type: e.message.message_type,
+        quotedId: e.message.quoted_id,
         priority: e.priority,
         reasons: e.reasons,
       })),
@@ -883,6 +1023,18 @@ export class WaconService {
       return { sent: false, dryRun: true, messageId: null, reason: "dryRun activo — archivo registrado pero NO enviado", kind: media.kind, fileName: media.fileName };
     }
 
+    // Refuse up front instead of letting a truncated upload vanish on the phone.
+    const free = freeDiskBytes(tmpdir());
+    const needed = stagingBytesNeeded(media.bytes);
+    if (free !== null && free < needed) {
+      const mb = (b: number) => `${Math.ceil(b / 1024 / 1024)} MB`;
+      return logError(
+        this.store,
+        { operation: "send_file", chatJid, error: new Error(`disk: ${free} free < ${needed} needed`), context: { filePath, kind: media.kind }, client: clientName },
+        `No hay espacio en disco para preparar el archivo (necesito ${mb(needed)}, quedan ${mb(free)}). Libera espacio y vuelve a intentarlo; no se envió nada.`
+      );
+    }
+
     try {
       // A real voice note has to be ogg/opus with a waveform, so audio marked as
       // one goes through the voice packer instead of being shipped as-is.
@@ -891,7 +1043,8 @@ export class WaconService {
         const voice = toVoiceNote(media.buffer, media.mimetype, findFfmpeg(config.ffmpegPath));
         content = voiceNoteContent(voice);
       } else {
-        content = toMessageContent(media, { caption: opts.caption, asVoiceNote: opts.asVoiceNote });
+        const preview = media.kind === "video" ? videoPreview(media.buffer, extname(media.fileName), findFfmpeg(config.ffmpegPath)) : {};
+        content = toMessageContent(media, { caption: opts.caption, asVoiceNote: opts.asVoiceNote, ...preview });
       }
       const { id } = await this.connection.sendMedia(chatJid, content);
       this.store.logSent({ chatJid, text: label, clientName, dryRun: false });
