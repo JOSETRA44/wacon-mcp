@@ -1,16 +1,26 @@
-# Publishes to npm when you create a GitHub Release.
-# One-time setup: create an npm automation token (npmjs.com > Access Tokens >
-# Generate New Token > Automation) and save it as the repo secret NPM_TOKEN
-# (GitHub repo > Settings > Secrets and variables > Actions).
+# Configure the npm trusted publisher first; see docs/RELEASING.md.
 name: Publish to npm
 
 on:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
 jobs:
   publish:
+    if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      WACON_SKIP_POSTINSTALL: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -18,7 +28,12 @@ jobs:
           node-version: 22
           cache: npm
           registry-url: https://registry.npmjs.org
-      - run: npm ci
-      - run: npm publish
+      - name: Install npm with OIDC support
+        run: npm install -g npm@11
+      - name: Check release tag
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: node --input-type=module -e "import fs from 'node:fs'; const p = JSON.parse(fs.readFileSync('package.json', 'utf8')); if (process.env.RELEASE_TAG !== 'v' + p.version) throw new Error('Release tag must match v' + p.version);"
+      - run: npm ci
+      # npm publish runs prepublishOnly (types/tests), then prepare (build).
+      - run: npm publish --access public --provenance
