@@ -6,7 +6,7 @@ export default defineConfig({
     daemon: "src/daemon/entry.ts",
   },
   format: ["esm"],
-  target: "node20",
+  target: "node22",
   platform: "node",
   clean: true,
   splitting: false,
