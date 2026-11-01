@@ -22,6 +22,8 @@ export interface ChatOverviewRow {
   last_from_me: number | null;
   last_type: string | null;
   last_sender_name: string | null;
+  /** 1 when the chat is archived on the phone. */
+  archived?: number;
 }
 
 export interface ContactRow {
@@ -147,6 +149,20 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages (chat_jid, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_from_me ON messages (from_me, timestamp DESC);
+
+-- Reactions live apart from messages on purpose: an emoji reaction is not
+-- something the user WROTE, and mixing it into messages.text would leak into
+-- style analysis. One row per (message, reactor); an empty emoji = removed.
+CREATE TABLE IF NOT EXISTS reactions (
+  chat_jid TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  sender_jid TEXT NOT NULL,
+  from_me INTEGER NOT NULL DEFAULT 0,
+  emoji TEXT NOT NULL,
+  timestamp INTEGER NOT NULL,
+  PRIMARY KEY (chat_jid, target_id, sender_jid)
+);
+CREATE INDEX IF NOT EXISTS idx_reactions_target ON reactions (chat_jid, target_id);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   text,
@@ -347,6 +363,12 @@ CREATE TABLE IF NOT EXISTS jid_map (
 );
 CREATE INDEX IF NOT EXISTS idx_jidmap_pn ON jid_map (pn);
 
+-- One-off repairs and other small facts the store must remember across runs.
+CREATE TABLE IF NOT EXISTS meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
 -- Online/last-seen state, as reported by WhatsApp. Cached because presence
 -- only arrives while subscribed: after a restart the last known value is
 -- better than nothing, as long as we always say HOW OLD it is.
@@ -379,6 +401,13 @@ export class Store {
     // Repair rows written while upsertChat leaked its "-1 = unknown" sentinel
     // into the INSERT path; a negative counter broke every later +1.
     this.db.exec(`UPDATE chats SET unread_count = 0 WHERE unread_count < 0`);
+    // Delivery state of our own messages (WhatsApp's ✓ / ✓✓ / blue). Added
+    // later, so older databases get the column here.
+    const cols = this.db.prepare(`PRAGMA table_info(messages)`).all() as { name: string }[];
+    if (!cols.some((c) => c.name === "status")) this.db.exec(`ALTER TABLE messages ADD COLUMN status INTEGER`);
+    // Archived on the phone (WhatsApp's "Archivados"), synced from app state.
+    const chatCols = this.db.prepare(`PRAGMA table_info(chats)`).all() as { name: string }[];
+    if (!chatCols.some((c) => c.name === "archived")) this.db.exec(`ALTER TABLE chats ADD COLUMN archived INTEGER NOT NULL DEFAULT 0`);
   }
 
   close(): void {
@@ -405,6 +434,30 @@ export class Store {
         unreadCount: chat.unreadCount ?? -1,
         lastMessageTs: chat.lastMessageTs ?? null,
       });
+  }
+
+  /**
+   * Archive state, applied to both halves of an @lid/phone pair: the phone
+   * names the chat by either, and the list folds them into one row.
+   */
+  setArchived(jid: string, archived: boolean): void {
+    const alt = jid.endsWith("@lid") ? this.pnForLid(jid) : this.lidForPn(jid);
+    const set = this.db.prepare(`UPDATE chats SET archived = ? WHERE jid = ?`);
+    for (const j of [jid, ...(alt ? [alt] : [])]) set.run(archived ? 1 : 0, j);
+    // A chat we have not seen yet still has to remember it.
+    this.db.prepare(`INSERT OR IGNORE INTO chats (jid, name, is_group, unread_count, last_message_ts, archived) VALUES (?, NULL, ?, 0, NULL, ?)`).run(jid, jid.endsWith("@g.us") ? 1 : 0, archived ? 1 : 0);
+  }
+
+  archivedCount(): number {
+    return (this.db.prepare(`SELECT COUNT(*) n FROM chats WHERE archived = 1`).get() as { n: number }).n;
+  }
+
+  /** Small facts the store keeps across runs (one-off repairs, sync flags). */
+  getMeta(key: string): string | null {
+    return (this.db.prepare(`SELECT value FROM meta WHERE key = ?`).get(key) as { value: string } | undefined)?.value ?? null;
+  }
+  setMeta(key: string, value: string): void {
+    this.db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)`).run(key, value);
   }
 
   /**
@@ -452,7 +505,7 @@ export class Store {
   chatOverview(limit = 150): ChatOverviewRow[] {
     return this.db
       .prepare(
-        `SELECT c.jid, c.is_group, c.unread_count, c.last_message_ts,
+        `SELECT c.jid, c.is_group, c.unread_count, c.last_message_ts, c.archived,
                 COALESCE(c.name, ct.name, ct.notify_name, ct2.name, ct2.notify_name) AS display_name,
                 CASE WHEN jm.lid = c.jid THEN jm.pn WHEN jm.pn = c.jid THEN jm.lid END AS alt_jid,
                 m.text AS last_text, m.from_me AS last_from_me, m.message_type AS last_type,
@@ -539,6 +592,27 @@ export class Store {
     }
   }
 
+  /**
+   * Record how far one of our messages got: 1 pending, 2 server, 3 delivered,
+   * 4 read, 5 played. Receipts arrive out of order, so it only moves forward.
+   */
+  updateMessageStatus(chatJid: string, id: string, status: number): void {
+    const run = (jid: string) =>
+      this.db.prepare(`UPDATE messages SET status = MAX(COALESCE(status, 0), ?) WHERE chat_jid = ? AND id = ?`).run(status, jid, id).changes;
+    if (run(chatJid) > 0) return;
+    // The receipt can name the other half of the @lid/phone pair.
+    const alt = chatJid.endsWith("@lid") ? this.pnForLid(chatJid) : this.lidForPn(chatJid);
+    if (alt) run(alt);
+  }
+
+  /** Current delivery state of some of our messages, for the ✓✓ in the chat view. */
+  messageStatuses(ids: string[]): { id: string; status: number | null }[] {
+    if (ids.length === 0) return [];
+    return this.db
+      .prepare(`SELECT id, MAX(status) AS status FROM messages WHERE id IN (SELECT value FROM json_each(?)) GROUP BY id`)
+      .all(JSON.stringify(ids)) as { id: string; status: number | null }[];
+  }
+
   insertMessages(msgs: MessageRow[]): void {
     const insert = this.db.transaction((rows: MessageRow[]) => {
       for (const row of rows) this.insertMessage(row);
@@ -546,11 +620,64 @@ export class Store {
     insert(msgs);
   }
 
+  /**
+   * Record (or clear, with an empty emoji) one person's reaction. Older
+   * events never overwrite newer ones — history sync arrives out of order.
+   */
+  upsertReaction(r: { chatJid: string; targetId: string; senderJid: string; fromMe: boolean; emoji: string; timestamp: number }): void {
+    if (!r.emoji) {
+      this.db
+        .prepare(`DELETE FROM reactions WHERE chat_jid = ? AND target_id = ? AND sender_jid = ? AND timestamp <= ?`)
+        .run(r.chatJid, r.targetId, r.senderJid, r.timestamp);
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO reactions (chat_jid, target_id, sender_jid, from_me, emoji, timestamp)
+         VALUES (@chatJid, @targetId, @senderJid, @fromMe, @emoji, @timestamp)
+         ON CONFLICT(chat_jid, target_id, sender_jid) DO UPDATE SET
+           emoji = excluded.emoji, from_me = excluded.from_me, timestamp = excluded.timestamp
+         WHERE excluded.timestamp >= reactions.timestamp`
+      )
+      .run({ ...r, fromMe: r.fromMe ? 1 : 0 });
+  }
+
+  /** Reactions on the given messages, across the given chats (an @lid/phone pair). */
+  reactionsFor(chatJids: string[], targetIds: string[]): { target_id: string; sender_jid: string; from_me: number; emoji: string }[] {
+    if (chatJids.length === 0 || targetIds.length === 0) return [];
+    return this.db
+      .prepare(
+        `SELECT target_id, sender_jid, from_me, emoji FROM reactions
+         WHERE chat_jid IN (SELECT value FROM json_each(?)) AND target_id IN (SELECT value FROM json_each(?))`
+      )
+      .all(JSON.stringify(chatJids), JSON.stringify(targetIds)) as { target_id: string; sender_jid: string; from_me: number; emoji: string }[];
+  }
+
+  /**
+   * Messages by id, preferring the given chats. Ids are per-chat in the
+   * schema, but a quote can point into the other half of an @lid/phone pair,
+   * so an id is looked up in the preferred chats first, then anywhere.
+   */
+  messagesByIds(ids: string[], preferChats: string[] = []): MessageRow[] {
+    if (ids.length === 0) return [];
+    const stmt = this.db.prepare(
+      `SELECT id, chat_jid, sender_jid, from_me, timestamp, text, message_type, quoted_id
+       FROM messages WHERE id = ?
+       ORDER BY CASE WHEN chat_jid IN (SELECT value FROM json_each(?)) THEN 0 ELSE 1 END
+       LIMIT 1`
+    );
+    const prefer = JSON.stringify(preferChats);
+    return ids.flatMap((id) => {
+      const row = stmt.get(id, prefer) as MessageRow | undefined;
+      return row ? [row] : [];
+    });
+  }
+
   readMessages(chatJid: string, limit = 30, beforeTs?: number): MessageRow[] {
     if (beforeTs !== undefined) {
       return this.db
         .prepare(
-          `SELECT id, chat_jid, sender_jid, from_me, timestamp, text, message_type, quoted_id
+          `SELECT id, chat_jid, sender_jid, from_me, timestamp, text, message_type, quoted_id, status
            FROM messages WHERE chat_jid = ? AND timestamp < ?
            ORDER BY timestamp DESC LIMIT ?`
         )
@@ -558,7 +685,7 @@ export class Store {
     }
     return this.db
       .prepare(
-        `SELECT id, chat_jid, sender_jid, from_me, timestamp, text, message_type, quoted_id
+        `SELECT id, chat_jid, sender_jid, from_me, timestamp, text, message_type, quoted_id, status
          FROM messages WHERE chat_jid = ?
          ORDER BY timestamp DESC LIMIT ?`
       )
@@ -584,6 +711,37 @@ export class Store {
          ORDER BY m.timestamp DESC LIMIT @limit`
       )
       .all({ query: ftsQuery, chatJid: opts.chatJid, limit }) as (MessageRow & { snippet: string })[];
+  }
+
+  /**
+   * Messages whose text contains any of `patterns` (URL fragments or file
+   * extensions), newest first, across every chat unless `chatJids` narrows it.
+   * LIKE, not FTS: the FTS tokenizer splits URLs into useless pieces.
+   */
+  findLinks(patterns: string[], opts: { chatJids?: string[]; sinceTs?: number; text?: string; limit?: number } = {}): MessageRow[] {
+    if (patterns.length === 0) return [];
+    const params: unknown[] = patterns.map((p) => `%${p.replace(/[%_]/g, "")}%`);
+    let where = `(${patterns.map(() => "text LIKE ?").join(" OR ")})`;
+    if (opts.chatJids?.length) {
+      where += ` AND chat_jid IN (${opts.chatJids.map(() => "?").join(",")})`;
+      params.push(...opts.chatJids);
+    }
+    if (opts.sinceTs) {
+      where += " AND timestamp >= ?";
+      params.push(opts.sinceTs);
+    }
+    if (opts.text?.trim()) {
+      where += " AND text LIKE ?";
+      params.push(`%${opts.text.trim().replace(/[%_]/g, "")}%`);
+    }
+    params.push(Math.min(200, opts.limit ?? 30));
+    return this.db
+      .prepare(
+        `SELECT id, chat_jid, sender_jid, from_me, timestamp, text, message_type, quoted_id
+         FROM messages WHERE ${where} AND chat_jid NOT LIKE '%@newsletter' AND chat_jid <> 'status@broadcast'
+         ORDER BY timestamp DESC LIMIT ?`
+      )
+      .all(...params) as MessageRow[];
   }
 
   /** Messages sent by the user in one chat — the raw material for style analysis. */
@@ -1035,9 +1193,47 @@ export class Store {
 
   // ── LID ↔ phone mapping & chat resolution ────────────────
 
-  mapJids(lid: string, pn: string): void {
-    if (!lid.endsWith("@lid") || !pn.includes("@")) return;
+  /** The linked account's own identities; null until the first login. */
+  private self: { pn: string | null; lid: string | null } = { pn: null, lid: null };
+
+  /**
+   * Tell the store who "me" is. Our own @lid and phone are the one pair we
+   * know for certain, so they are pinned here and nothing else may claim
+   * them. A guess once mapped the self chat to Meta AI's number, and the
+   * self chat took that name.
+   */
+  setSelf(pn: string | null, lid: string | null): void {
+    const bare = (j: string | null) => (j ? j.replace(/:\d+@/, "@") : null);
+    this.self = { pn: bare(pn), lid: bare(lid) };
+    const { pn: p, lid: l } = this.self;
+    if (!p || !l) return;
+    this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM jid_map WHERE (lid = ? AND pn <> ?) OR (pn = ? AND lid <> ?)`).run(l, p, p, l);
+      this.db.prepare(`INSERT INTO jid_map (lid, pn) VALUES (?, ?) ON CONFLICT(lid) DO UPDATE SET pn = excluded.pn`).run(l, p);
+      // Names mirrored onto the self chat came from someone else.
+      this.db.prepare(`UPDATE chats SET name = NULL WHERE jid IN (?, ?)`).run(l, p);
+      this.db.prepare(`UPDATE contacts SET name = (SELECT name FROM contacts WHERE jid = ?) WHERE jid = ?`).run(p, l);
+    })();
+  }
+
+  /** Is this jid (either half) the linked account itself? */
+  isSelf(jid: string): boolean {
+    const j = jid.replace(/:\d+@/, "@");
+    return j === this.self.pn || j === this.self.lid;
+  }
+
+  selfJids(): { pn: string | null; lid: string | null } {
+    return { ...this.self };
+  }
+
+  /** Link the two halves of one person. Returns false when the pair is refused. */
+  mapJids(lid: string, pn: string): boolean {
+    if (!lid.endsWith("@lid") || !pn.includes("@")) return false;
+    // Our own identities are pinned by setSelf; no other pairing may claim them.
+    const { pn: sp, lid: sl } = this.self;
+    if (sl && sp && (lid === sl) !== (pn === sp)) return false;
     this.db.prepare(`INSERT INTO jid_map (lid, pn) VALUES (?, ?) ON CONFLICT(lid) DO UPDATE SET pn = excluded.pn`).run(lid, pn);
+    return true;
   }
 
   // ── presence (online / last seen) ────────────────────────
@@ -1164,16 +1360,23 @@ export class Store {
    */
   backfillJidMapFromGreetings(): number {
     const contacts = this.db
-      .prepare(`SELECT jid, name FROM contacts WHERE name IS NOT NULL AND jid LIKE '%@s.whatsapp.net'`)
+      .prepare(
+        `SELECT jid, name FROM contacts WHERE name IS NOT NULL AND jid LIKE '%@s.whatsapp.net'
+         -- service accounts (WhatsApp itself, Meta AI, business assistants) are not people
+         AND jid NOT LIKE '0@%' AND jid NOT LIKE '1313555%'`
+      )
       .all() as { jid: string; name: string }[];
-    let mapped = 0;
     const findLid = this.db.prepare(
       `SELECT m.chat_jid j, COUNT(*) n FROM messages_fts f JOIN messages m ON m.rowid=f.rowid
        WHERE messages_fts MATCH ? AND m.from_me=1 AND m.chat_jid LIKE '%@lid'
        GROUP BY m.chat_jid ORDER BY n DESC LIMIT 2`
     );
+
+    // Pass 1: which @lid chat would each contact's first name point at?
+    const claims = new Map<string, { jid: string; name: string }[]>();
     for (const c of contacts) {
-      if (this.lidForPn(c.jid)) continue; // already mapped
+      if (this.isSelf(c.jid)) continue;
+      const mapped = this.lidForPn(c.jid);
       const first = c.name.trim().split(/\s+/)[0];
       if (!first || first.length < 3) continue;
       let rows: { j: string; n: number }[] = [];
@@ -1182,15 +1385,43 @@ export class Store {
       } catch {
         continue;
       }
-      // Strong, unambiguous signal only: greeted ≥3× and clearly ahead of #2.
+      // Strong signal only: written ≥3× and clearly ahead of #2.
       const top = rows[0];
       if (!top || top.n < 3) continue;
       if (rows[1] && rows[1].n * 2 > top.n) continue;
-      this.mapJids(top.j, c.jid);
-      this.upsertContact({ jid: top.j, name: c.name });
-      this.upsertChat({ jid: top.j, name: c.name });
-      mapped++;
+      if (mapped && mapped !== top.j) continue; // already linked elsewhere, by WhatsApp itself
+      if (this.isSelf(top.j)) continue; // your notes mention everyone; they are nobody's chat
+      const list = claims.get(top.j) ?? [];
+      list.push(c);
+      claims.set(top.j, list);
     }
+
+    // Pass 2: a chat claimed by several names is a notes or shared chat, not
+    // one person — that is how the self chat became "Meta AI". Undo an old
+    // guess there once; link only chats exactly one contact points at.
+    const undoDone = this.db.prepare(`SELECT 1 FROM meta WHERE key = 'greeting_map_v2'`).get();
+    let mapped = 0;
+    this.db.transaction(() => {
+      for (const [lid, list] of claims) {
+        const current = this.pnForLid(lid);
+        if (list.length > 1) {
+          const guessed = list.find((c) => c.jid === current);
+          if (!undoDone && guessed) {
+            this.db.prepare(`DELETE FROM jid_map WHERE lid = ?`).run(lid);
+            this.db.prepare(`UPDATE chats SET name = NULL WHERE jid = ? AND name = ?`).run(lid, guessed.name);
+            this.db.prepare(`UPDATE contacts SET name = NULL WHERE jid = ? AND name = ?`).run(lid, guessed.name);
+          }
+          continue;
+        }
+        if (current) continue; // never overwrite an existing link
+        const c = list[0]!;
+        this.mapJids(lid, c.jid);
+        this.upsertContact({ jid: lid, name: c.name });
+        this.upsertChat({ jid: lid, name: c.name });
+        mapped++;
+      }
+      this.db.prepare(`INSERT OR REPLACE INTO meta (key, value) VALUES ('greeting_map_v2', ?)`).run(String(Date.now()));
+    })();
     return mapped;
   }
 

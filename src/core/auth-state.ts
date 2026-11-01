@@ -36,6 +36,11 @@ export class AuthWriteError extends Error {
   }
 }
 
+/** Free bytes on the volume holding `dir`, or null when the OS won't say. */
+export function freeDiskBytes(dir: string): number | null {
+  return freeBytes(dir);
+}
+
 function freeBytes(dir: string): number | null {
   try {
     const s = statfsSync(dir);
@@ -74,6 +79,19 @@ function writeAtomic(filePath: string, contents: string): void {
       // temp may not exist — the original file is intact either way
     }
     throw err;
+  }
+}
+
+/**
+ * Who the linked account is (phone jid + @lid), read straight from creds.json
+ * without opening a socket — available before the connection comes up.
+ */
+export function readSelfIdentity(folder: string): { pn: string | null; lid: string | null } {
+  try {
+    const creds = JSON.parse(readFileSync(join(folder, "creds.json"), "utf8")) as { me?: { id?: string; lid?: string } };
+    return { pn: creds.me?.id ?? null, lid: creds.me?.lid ?? null };
+  } catch {
+    return { pn: null, lid: null };
   }
 }
 
