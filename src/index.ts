@@ -920,9 +920,10 @@ program
 program
   .command("mcp")
   .description("Run the MCP server over stdio (register this in your AI agent)")
-  .action(async () => {
+  .option("--toolset <set>", "full (default) or tui: the small read-only set used by Modo IA", "full")
+  .action(async (opts: { toolset?: string }) => {
     try {
-      await runStdioServer();
+      await runStdioServer({ toolset: opts.toolset === "tui" ? "tui" : "full" });
     } catch (err) {
       die(err);
     }

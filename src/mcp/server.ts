@@ -4,9 +4,27 @@ import QRCode from "qrcode";
 import type { WaconApi } from "./api.js";
 import { PROFILE_SECTIONS } from "../memory/profiles.js";
 import { MAX_WATCH_MINUTES } from "../core/watch.js";
+import { TUI_TOOLSET } from "../tui/domain/agent.js";
+import { LINK_KINDS } from "../core/links.js";
+import { isInvisibleMessage } from "../core/message-types.js";
 
+/**
+ * "full": every tool (what agents registered by the user get).
+ * "tui": the small, read-mostly set an agent gets inside `wacon chat ultra`
+ * — ~14 schemas instead of ~66 keeps every question cheap, and no tool
+ * there can send anything: messages are only proposed (propose_reply).
+ */
+export type Toolset = "full" | "tui";
+
+/**
+ * Tool result as text plus the same data as `structuredContent`. MCP requires
+ * structuredContent to be an object; clients that derive it from the text
+ * when it is missing (Gemini CLI) choked on bare arrays like read_messages'
+ * — "expected record, received array" — so lists are wrapped.
+ */
 function json(data: unknown) {
-  return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+  const structured = data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : { result: data };
+  return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }], structuredContent: structured };
 }
 
 function iso(ts: number | null): string | null {
@@ -31,8 +49,62 @@ function formatMessages(rows: { timestamp: number; from_me: number; sender_jid: 
  * exact same tools are served over Streamable HTTP (in the daemon) and over
  * stdio (via the shim that proxies to the daemon).
  */
-export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
+export function buildMcpServer(api: WaconApi, clientLabel = "mcp", opts: { toolset?: Toolset } = {}): McpServer {
   const server = new McpServer({ name: "wacon", version: "0.1.0" });
+  if (opts.toolset === "tui") {
+    // Register only the allowed tools: the rest of this file stays unaware.
+    const allowed = new Set<string>(TUI_TOOLSET);
+    const register = server.registerTool.bind(server) as (...a: unknown[]) => unknown;
+    (server as unknown as { registerTool: (...a: unknown[]) => unknown }).registerTool = (name: unknown, ...rest: unknown[]) =>
+      allowed.has(String(name)) ? register(name, ...rest) : undefined;
+
+    server.registerTool(
+      "propose_reply",
+      {
+        title: "Propose a message for the user to send",
+        description:
+          "Show the user a draft message for this chat. Wacon never lets you send from here: the user sees the draft in the app and decides to send, edit or discard it. Use this whenever you suggest what to write.",
+        inputSchema: {
+          chat: z.string().describe("Chat JID (given in the context)"),
+          text: z.string().min(1).describe("The exact message text, written as the user would write it"),
+          reply_to: z.string().optional().describe("Message id this replies to (quote), if any"),
+        },
+      },
+      async () => json({ ok: true, shown_to_user: true, note: "Borrador mostrado al usuario; él decide si enviarlo. No lo envíes tú." })
+    );
+
+    server.registerTool(
+      "propose_event",
+      {
+        title: "Propose adding an event to the user's agenda",
+        description:
+          "Suggest an event (exam, meeting, deadline, appointment) for the user's Wacon agenda. The user sees it as a card and adds it with one key — you never write the agenda directly. Use one call per event; only future dates.",
+        inputSchema: {
+          title: z.string().min(1).describe("Short title, e.g. 'Examen parcial de Microeconomía'"),
+          start: z.string().describe("ISO 8601 date-time in the user's local time, e.g. 2026-11-05T10:00:00"),
+          chat: z.string().optional().describe("Chat JID where it was mentioned"),
+          notes: z.string().optional().describe("Where/what to bring, or a quote of the message"),
+        },
+      },
+      async () => json({ ok: true, shown_to_user: true, note: "Propuesta mostrada al usuario; él decide si la añade." })
+    );
+
+    server.registerTool(
+      "propose_task",
+      {
+        title: "Propose adding a task to the user's list",
+        description:
+          "Suggest a task the user has to do (fill a form, send a document, pay something), optionally with a due date. Shown as a card the user accepts — you never write the list directly.",
+        inputSchema: {
+          title: z.string().min(1).describe("What to do, e.g. 'Llenar el sheet de asistencia de Operaciones'"),
+          due: z.string().optional().describe("ISO 8601 due date, if any"),
+          chat: z.string().optional().describe("Chat JID where it came from"),
+          notes: z.string().optional().describe("Link or details"),
+        },
+      },
+      async () => json({ ok: true, shown_to_user: true, note: "Propuesta mostrada al usuario; él decide si la añade." })
+    );
+  }
 
   // ── session ──────────────────────────────────────────────
 
@@ -117,14 +189,17 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
         before_timestamp: z.number().optional().describe("Only messages older than this Unix ms timestamp"),
       },
     },
-    async ({ chat, limit, before_timestamp }) => json(formatMessages(await api.readMessages(chat, limit, before_timestamp)))
+    async ({ chat, limit, before_timestamp }) =>
+      // Protocol/unknown rows carry no text: an agent paid tokens to learn nothing.
+      // Fetch extra, filter, then cut — so `limit` counts real messages.
+      json(formatMessages((await api.readMessages(chat, Math.min(500, (limit ?? 30) * 4), before_timestamp)).filter((m) => !isInvisibleMessage(m.message_type, m.text)).slice(0, limit ?? 30)))
   );
 
   server.registerTool(
     "search_messages",
     {
       title: "Full-text search in message history",
-      description: "Search the entire synced message history (or one chat) with full-text search. Great for recalling topics, commitments, or how something was discussed before.",
+      description: "Search the entire synced message history — ALL chats and groups — or one chat with full-text search. Omit `chat` to search everywhere; each hit says which chat it came from. For shared links/files (sheets, forms…) use find_links instead.",
       inputSchema: {
         query: z.string().min(1).describe("Words to search for"),
         chat: z.string().optional().describe("Restrict to this chat JID or phone"),
@@ -136,12 +211,33 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
       return json(
         rows.map((m) => ({
           chat: m.chat_jid,
+          chatName: m.chat_name ?? null,
           at: iso(m.timestamp),
           from: m.from_me ? "me" : (m.sender_jid ?? "unknown"),
           snippet: m.snippet,
           text: m.text,
         }))
       );
+    }
+  );
+
+  server.registerTool(
+    "find_links",
+    {
+      title: "Find shared links and files across all chats",
+      description:
+        "Find links and files people shared, by what they point to — Google Sheets/Excel, forms to fill (Google Forms, Microsoft Forms, Typeform), docs, slides, Drive/Dropbox, Meet/Zoom — across ALL chats and groups (or one). Full-text search cannot find these: URLs are split into tokens. Example: '¿dónde me mandaron sheets para llenar?' → kinds=['sheets','forms'].",
+      inputSchema: {
+        kinds: z.array(z.enum(LINK_KINDS)).optional().describe("What to look for; default any link"),
+        chat: z.string().optional().describe("Restrict to one chat (JID, phone or name); omit for all chats"),
+        text: z.string().optional().describe("Optional word that must also appear in the message, e.g. 'asistencia'"),
+        days: z.number().int().min(1).max(3650).optional().describe("Only the last N days"),
+        limit: z.number().int().min(1).max(100).default(30),
+      },
+    },
+    async ({ kinds, chat, text, days, limit }) => {
+      const hits = await api.findLinks({ kinds, chat, text, days, limit });
+      return json({ total: hits.length, hits: hits.map((h) => ({ ...h, at: iso(h.at) })) });
     }
   );
 
@@ -356,9 +452,28 @@ export function buildMcpServer(api: WaconApi, clientLabel = "mcp"): McpServer {
           .max(15000)
           .default(0)
           .describe("Show 'escribiendo…' for this long before sending. Real people don't reply instantly with a paragraph — a value near (text length × 40ms) reads as human."),
+        reply_to: z
+          .string()
+          .optional()
+          .describe("Message id (from read_messages) to quote, like swiping to reply on the phone. Use it when answering one specific message in a busy chat."),
       },
     },
-    async ({ chat, text, typing_ms }) => json(await api.send(chat, text, clientLabel, typing_ms))
+    async ({ chat, text, typing_ms, reply_to }) => json(await api.send(chat, text, clientLabel, typing_ms, reply_to))
+  );
+
+  server.registerTool(
+    "react_to_message",
+    {
+      title: "React to a message with an emoji",
+      description:
+        "Add the user's emoji reaction to a specific message (the id comes from read_messages), like long-pressing it on the phone. Often the most natural answer to a photo or a 'gracias' is a ❤️ or 👍 rather than words. Pass an empty emoji to remove the reaction. Same guardrails as send_message.",
+      inputSchema: {
+        chat: z.string().describe("Chat JID or phone number"),
+        message_id: z.string().describe("Id of the message to react to"),
+        emoji: z.string().max(16).describe("One emoji, e.g. ❤️ 👍 😂 — empty string removes the reaction"),
+      },
+    },
+    async ({ chat, message_id, emoji }) => json(await api.react(chat, message_id, emoji, clientLabel))
   );
 
   // ── attention control (token efficiency) ─────────────────

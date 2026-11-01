@@ -1,5 +1,6 @@
 import type { MessageRow } from "../core/store.js";
-import type { StatusInfo, SendResult, WaitResult, DigestEntry } from "../core/service.js";
+import type { StatusInfo, SendResult, WaitResult, DigestEntry, LinkHit } from "../core/service.js";
+import type { LinkKind } from "../core/links.js";
 import type { RecallResult } from "../memory/recall.js";
 import type { WatchRule, WatchSession } from "../core/watch.js";
 import type { WatchWindowSuggestion } from "../core/activity.js";
@@ -50,14 +51,21 @@ export interface WaconApi {
   /** Chat list rows with last-message preview — what a WhatsApp-style UI renders. */
   chatOverview(limit?: number): Promise<ChatOverviewRow[]>;
   readMessages(chat: string, limit?: number, beforeTs?: number): Promise<MessageRow[]>;
-  searchMessages(query: string, chat?: string, limit?: number): Promise<(MessageRow & { snippet: string })[]>;
+  /** React to a message (empty emoji removes it). Same guardrails as send. */
+  react(chat: string, messageId: string, emoji: string, clientName: string): Promise<SendResult>;
+  messageReactions(chat: string, ids: string[]): Promise<{ target_id: string; sender_jid: string; from_me: number; emoji: string }[]>;
+  /** Specific messages by id — what a UI needs to draw quotes of older messages. */
+  messagesByIds(chat: string, ids: string[]): Promise<MessageRow[]>;
+  messageStatuses(ids: string[]): Promise<{ id: string; status: number | null }[]>;
+  searchMessages(query: string, chat?: string, limit?: number): Promise<(MessageRow & { snippet: string; chat_name?: string | null })[]>;
+  findLinks(opts: { kinds?: LinkKind[]; chat?: string; text?: string; days?: number; limit?: number }): Promise<LinkHit[]>;
   recall(query: string, chat?: string, limit?: number): Promise<RecallResult>;
   listEpisodes(chat: string, limit?: number): Promise<unknown[]>;
   readEpisode(episodeId: number): Promise<unknown>;
   summarizeEpisode(episodeId: number, summary: string): Promise<unknown>;
   searchContacts(query: string, limit?: number): Promise<unknown[]>;
   groupInfo(groupJid: string): Promise<GroupInfo>;
-  send(chat: string, text: string, clientName: string, typingMs?: number): Promise<SendResult>;
+  send(chat: string, text: string, clientName: string, typingMs?: number, replyTo?: string): Promise<SendResult>;
   startWatch(rule: Partial<WatchRule>, durationMinutes: number, clientName: string): Promise<WatchSession>;
   stopWatch(sessionId?: string): Promise<{ stopped: number }>;
   watchStatus(): Promise<{ sessions: (WatchSession & { minutesLeft: number })[]; cursor: number }>;
@@ -100,6 +108,8 @@ export interface WaconApi {
   listSuggestedEvents(status?: string, limit?: number): Promise<{ id: number; chat: string; chatName: string | null; title: string; when: string | null; raw: string | null }[]>;
   confirmSuggestedEvent(id: number, notifyBeforeMinutes?: number): Promise<{ confirmed: boolean; eventId?: number }>;
   dismissSuggestedEvent(id: number): Promise<{ dismissed: boolean }>;
+  dismissStaleSuggestions(days?: number): Promise<{ dismissed: number; remaining: number }>;
+  staleSuggestionCount(days?: number): Promise<number>;
   readReceiptsMode(): Promise<"on" | "off" | "unknown">;
   contactPresence(chat: string, waitSeconds?: number): Promise<{
     chat: string;
@@ -134,14 +144,19 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
     listChats: async (limit) => service.listChats(limit),
     chatOverview: async (limit) => service.chatOverview(limit),
     readMessages: async (chat, limit, beforeTs) => service.readMessages(chat, limit, beforeTs),
+    messagesByIds: async (chat, ids) => service.messagesByIds(chat, ids),
+    messageStatuses: async (ids) => service.messageStatuses(ids),
+    react: (chat, messageId, emoji, clientName) => service.react(chat, messageId, emoji, clientName),
+    messageReactions: async (chat, ids) => service.messageReactions(chat, ids),
     searchMessages: async (query, chat, limit) => service.searchMessages(query, chat, limit),
+    findLinks: async (opts) => service.findLinks(opts),
     recall: async (query, chat, limit) => service.recall(query, chat, limit),
     listEpisodes: async (chat, limit) => service.listEpisodes(chat, limit),
     readEpisode: async (episodeId) => service.readEpisode(episodeId),
     summarizeEpisode: async (episodeId, summary) => service.summarizeEpisode(episodeId, summary),
     searchContacts: async (query, limit) => service.searchContacts(query, limit),
     groupInfo: (groupJid) => service.groupInfo(groupJid),
-    send: (chat, text, clientName, typingMs) => service.send(chat, text, clientName, typingMs),
+    send: (chat, text, clientName, typingMs, replyTo) => service.send(chat, text, clientName, typingMs, replyTo),
     startWatch: async (rule, durationMinutes, clientName) => service.startWatch(rule, durationMinutes, clientName),
     stopWatch: async (sessionId) => service.stopWatch(sessionId),
     watchStatus: async () => service.watchStatus(),
@@ -184,6 +199,8 @@ export function localApi(service: WaconService, daemonInfo?: { port: number; pid
     listSuggestedEvents: async (status, limit) => service.listSuggestedEvents(status, limit),
     confirmSuggestedEvent: async (id, notifyBeforeMinutes) => service.confirmSuggestedEvent(id, notifyBeforeMinutes),
     dismissSuggestedEvent: async (id) => service.dismissSuggestedEvent(id),
+    dismissStaleSuggestions: async (days) => service.dismissStaleSuggestions(days),
+    staleSuggestionCount: async (days) => service.staleSuggestionCount(days),
     readReceiptsMode: () => service.readReceiptsMode(),
     contactPresence: (chat, waitSeconds) => service.contactPresence(chat, waitSeconds),
     inbox: async (limit, includeGroups) => service.inbox(limit, includeGroups),
