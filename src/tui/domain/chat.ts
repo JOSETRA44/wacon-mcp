@@ -14,6 +14,32 @@ export interface ChatSummary {
   unread: number;
   lastTs: number;
   preview: { text: string; fromMe: boolean; senderName: string | null; kind: MessageKind } | null;
+  /** The "message yourself" chat. */
+  isSelf?: boolean;
+  /** Archived on the phone: lives under "Archivados", not in the main list. */
+  archived?: boolean;
+  /** A Wacon row that is not a WhatsApp chat (IA, Agenda, Archivados). */
+  special?: "home" | "agenda" | "archived";
+  /** Icon in place of the avatar initials, for special rows. */
+  icon?: string;
+  /** Second line of a special row (instead of a message preview). */
+  subtitle?: string;
+  /** Right-hand label of a special row (instead of a time). */
+  meta?: string;
+}
+
+/** WhatsApp's own label for the chat with yourself. */
+export const SELF_NAME = "Tú";
+export const SELF_SUBTITLE = "Mensajes para ti";
+
+/**
+ * Name the chat with yourself the way WhatsApp does. Without this it showed
+ * whatever name a heuristic had pinned on our own identity ("Meta AI").
+ */
+export function markSelf(chats: ChatSummary[], selfJids: readonly string[]): ChatSummary[] {
+  if (selfJids.length === 0) return chats;
+  const mine = new Set(selfJids);
+  return chats.map((c) => (mine.has(c.jid) || c.aliases.some((a) => mine.has(a)) ? { ...c, name: SELF_NAME, isSelf: true } : c));
 }
 
 export interface OverviewRow {
@@ -27,6 +53,7 @@ export interface OverviewRow {
   last_from_me: number | null;
   last_type: string | null;
   last_sender_name: string | null;
+  archived?: number;
 }
 
 /** WhatsApp never shows a raw jid to a human — a name, or a formatted number. */
@@ -50,6 +77,7 @@ export function toSummary(r: OverviewRow): ChatSummary {
     name: displayName(r.jid, r.display_name),
     isGroup: r.is_group === 1 || r.jid.endsWith("@g.us"),
     unread: Math.max(0, r.unread_count ?? 0),
+    archived: r.archived === 1,
     lastTs: r.last_message_ts ?? 0,
     preview: hasLast
       ? { text: cleanText(r.last_text, kind), fromMe: r.last_from_me === 1, senderName: r.last_sender_name, kind }
@@ -81,6 +109,7 @@ export function foldIdentities(chats: ChatSummary[]): ChatSummary[] {
       aliases: [...new Set([...primary.aliases, ...other.aliases, other.jid])].filter((j) => j !== primary.jid),
       name: named(primary) ? primary.name : named(other) ? other.name : primary.name,
       unread: primary.unread + other.unread,
+      archived: !!(primary.archived || other.archived),
       preview: primary.preview ?? other.preview,
     });
   }

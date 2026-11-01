@@ -17,16 +17,16 @@ export function daysAgo(ts: number, now: number): number {
   return Math.round((startOfDay(now) - startOfDay(ts)) / DAY);
 }
 
-export const clock = (ts: number): string =>
-  new Date(ts).toLocaleTimeString("es-PE", { hour: "2-digit", minute: "2-digit", hour12: false });
+export const clock = (ts: number, hour12 = false): string =>
+  new Date(ts).toLocaleTimeString("es-PE", { hour: hour12 ? "numeric" : "2-digit", minute: "2-digit", hour12 });
 
 const WEEKDAYS = ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"];
 
 /** Right-hand timestamp of a chat-list row. */
-export function listTime(ts: number, now: number): string {
+export function listTime(ts: number, now: number, hour12 = false): string {
   if (!ts) return "";
   const d = daysAgo(ts, now);
-  if (d <= 0) return clock(ts);
+  if (d <= 0) return clock(ts, hour12);
   if (d === 1) return "ayer";
   if (d < 7) return WEEKDAYS[new Date(ts).getDay()]!;
   return new Date(ts).toLocaleDateString("es-PE", { day: "2-digit", month: "2-digit", year: "2-digit" });

@@ -5,8 +5,28 @@
 
 export type MessageKind = "text" | "image" | "video" | "audio" | "voice" | "document" | "sticker" | "location" | "contact" | "poll" | "other";
 
-/** Lifecycle of a message: ours go pending → sent | failed; theirs are received. */
-export type DeliveryStatus = "pending" | "sent" | "failed" | "received";
+/**
+ * Our messages walk pending → sent (server ✓) → delivered (✓✓) → read (blue
+ * ✓✓). "sent" only means WhatsApp's server took it — not that it arrived.
+ */
+export type DeliveryStatus = "pending" | "sent" | "delivered" | "read" | "failed" | "received";
+
+/** WhatsApp's numeric ack (0 error … 5 played) → what the bubble shows. Unknown counts as sent. */
+export function deliveryFromAck(ack: number | null | undefined): DeliveryStatus {
+  if (ack === 0) return "failed";
+  if (ack === 1) return "pending";
+  if (ack === 3) return "delivered";
+  if (ack === 4 || ack === 5) return "read";
+  return "sent";
+}
+
+const DELIVERY_RANK: Record<DeliveryStatus, number> = { failed: -1, pending: 0, received: 0, sent: 1, delivered: 2, read: 3 };
+
+/** Receipts arrive out of order: a status may only move forward. */
+export function advanceDelivery(current: DeliveryStatus, next: DeliveryStatus): DeliveryStatus {
+  if (current === "failed" || current === "received") return current;
+  return DELIVERY_RANK[next] > DELIVERY_RANK[current] ? next : current;
+}
 
 export interface ChatMessage {
   /** Server id, or a `local-*` id while an optimistic send is in flight. */
@@ -23,6 +43,46 @@ export interface ChatMessage {
   error?: string;
   /** Wall-clock arrival, for the brief "just arrived" highlight. */
   arrivedAt?: number;
+  /** Id of the message this one replies to. */
+  quotedId?: string | null;
+  /** Reactions grouped by emoji, as WhatsApp shows them under a bubble. */
+  reactions?: ReactionSummary[];
+}
+
+export interface ReactionSummary {
+  emoji: string;
+  count: number;
+  /** Whether one of them is the user's own (shown highlighted). */
+  mine: boolean;
+}
+
+export interface RawReaction {
+  targetId: string;
+  senderJid: string | null;
+  fromMe: boolean;
+  emoji: string;
+}
+
+/** Collapse individual reactions into WhatsApp's "❤️ 2  😂" chips, most used first. */
+export function summarizeReactions(list: RawReaction[]): Map<string, ReactionSummary[]> {
+  const byTarget = new Map<string, Map<string, ReactionSummary>>();
+  for (const r of list) {
+    if (!r.emoji) continue;
+    const t = byTarget.get(r.targetId) ?? new Map<string, ReactionSummary>();
+    const cur = t.get(r.emoji) ?? { emoji: r.emoji, count: 0, mine: false };
+    cur.count++;
+    cur.mine ||= r.fromMe;
+    t.set(r.emoji, cur);
+    byTarget.set(r.targetId, t);
+  }
+  const out = new Map<string, ReactionSummary[]>();
+  for (const [id, m] of byTarget) out.set(id, [...m.values()].sort((a, b) => b.count - a.count));
+  return out;
+}
+
+/** One-line excerpt of a message, for quote blocks and the reply bar. */
+export function excerpt(m: Pick<ChatMessage, "kind" | "text">): string {
+  return mediaLabel(m.kind, m.text).replace(/\s+/g, " ").trim();
 }
 
 /**
