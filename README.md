@@ -16,7 +16,7 @@ Lee conversaciones, organiza pendientes y prepara respuestas con memoria por con
 </div>
 
 ---
-
+<img width="1917" height="1022" alt="image" src="https://github.com/user-attachments/assets/dc8a062f-f489-43cf-9d84-b8ce1b61a8ba" />
 Wacon es un **CLI y servidor MCP para WhatsApp**. Comparte una misma sesión entre la terminal y tus agentes, conserva el contexto de las conversaciones y permite trabajar con mensajes, archivos, recordatorios y perfiles de estilo.
 
 El almacenamiento y el análisis básico funcionan en tu equipo. Las integraciones con modelos, voz y NotebookLM son opcionales.
