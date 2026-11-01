@@ -55,11 +55,11 @@ const ConfigSchema = z.object({
   /** Max media size (bytes) Wacon will download and hand to an agent. */
   maxMediaBytes: z.number().int().default(16 * 1024 * 1024),
   /** Optional layer-2 audio transcription (default: native audio block). */
-  transcription: TranscriptionSchema.default({}),
+  transcription: TranscriptionSchema.prefault({}),
   /** Optional layer-2 image description (default: native image block). */
-  vision: VisionSchema.default({}),
+  vision: VisionSchema.prefault({}),
   /** Optional text-to-speech so agents can reply with a real voice note. */
-  tts: TtsSchema.default({}),
+  tts: TtsSchema.prefault({}),
   /**
    * ffmpeg, used to turn any audio into the ogg/opus WhatsApp needs and to draw
    * the waveform. Optional: without it only already-opus audio can be sent.
