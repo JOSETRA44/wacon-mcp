@@ -1,8 +1,28 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { extractFacts, extractActionables } from "../src/analysis/extractors.js";
 import { extractiveDigest } from "../src/analysis/summarize.js";
-import { AnalysisRunner } from "../src/analysis/runner.js";
-import { Store, type MessageRow } from "../src/core/store.js";
+import type { MessageRow } from "../src/core/store.js";
+
+let Store: typeof import("../src/core/store.js").Store;
+let AnalysisRunner: typeof import("../src/analysis/runner.js").AnalysisRunner;
+let testHome: string;
+
+beforeAll(async () => {
+  testHome = mkdtempSync(join(tmpdir(), "wacon-analysis-"));
+  vi.stubEnv("WACON_HOME", testHome);
+  // Profile paths are captured at import time, even with an in-memory database.
+  vi.resetModules();
+  ({ Store } = await import("../src/core/store.js"));
+  ({ AnalysisRunner } = await import("../src/analysis/runner.js"));
+});
+
+afterAll(() => {
+  vi.unstubAllEnvs();
+  if (testHome) rmSync(testHome, { recursive: true, force: true });
+});
 
 function msg(over: Partial<MessageRow>): MessageRow {
   return { id: Math.random().toString(36).slice(2), chat_jid: "c@s.whatsapp.net", sender_jid: null, from_me: 0, timestamp: Date.now(), text: null, message_type: "text", quoted_id: null, ...over };
@@ -73,7 +93,10 @@ describe("AnalysisRunner (brute force + progress)", () => {
     while (runner.status?.running && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
 
     expect(runner.status!.running).toBe(false);
+    expect(runner.status!.error).toBeNull();
     expect(runner.status!.processed).toBeGreaterThan(0);
+    expect(runner.status!.profilesBuilt).toBe(1);
+    expect(runner.status!.episodesSummarized).toBeGreaterThan(0);
     expect(runner.status!.factsFound).toBeGreaterThan(0);
     expect(store.listFacts("a@s.whatsapp.net").length).toBeGreaterThan(0);
     store.close();
