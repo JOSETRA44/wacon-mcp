@@ -1,323 +1,331 @@
-# Wacon — WhatsApp AI CLI + MCP Server
+<div align="center">
 
-Wacon conecta tu WhatsApp con agentes de IA (Claude Code, o cualquier cliente MCP) y con tu terminal. Su diferencial: **memoria de estilo por contacto** — los agentes no solo pueden leer y enviar mensajes, sino hacerlo imitando cómo TÚ le hablas a cada persona.
+# Wacon
 
-> ⚠️ **Advertencia**: Wacon usa [Baileys](https://github.com/WhiskeySockets/Baileys), una librería no oficial de ingeniería inversa del protocolo de WhatsApp Web. Esto **viola los Términos de Servicio de WhatsApp** y tu número puede ser **baneado permanentemente**. Úsalo bajo tu propio riesgo, idealmente con un número secundario. El rate-limit integrado reduce el riesgo, no lo elimina.
+**Tu WhatsApp, tu terminal, tus agentes de IA.**
+
+Lee conversaciones, organiza pendientes y prepara respuestas con memoria por contacto.
+
+[![WhatsApp](https://img.shields.io/badge/WhatsApp-CLI_%2B_MCP-25D366?style=flat-square&logo=whatsapp&logoColor=white)](#qué-puedes-hacer)
+[![npm](https://img.shields.io/badge/npm-%40josetra%2Fwacon-CB3837?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@josetra/wacon)
+[![Node.js](https://img.shields.io/badge/Node.js-%E2%89%A5_22.18.0-5FA04E?style=flat-square&logo=nodedotjs&logoColor=white)](https://nodejs.org/)
+[![Licencia MIT](https://img.shields.io/badge/Licencia-MIT-64748B?style=flat-square)](LICENSE)
+
+[Instalación](#instalación) · [Primeros pasos](#primeros-pasos) · [Conectar un agente](#conectar-un-agente) · [Configuración](#configuración) · [Desarrollo](#desarrollo)
+
+</div>
+
+---
+
+Wacon es un **CLI y servidor MCP para WhatsApp**. Comparte una misma sesión entre la terminal y tus agentes, conserva el contexto de las conversaciones y permite trabajar con mensajes, archivos, recordatorios y perfiles de estilo.
+
+El almacenamiento y el análisis básico funcionan en tu equipo. Las integraciones con modelos, voz y NotebookLM son opcionales.
+
+## Qué puedes hacer
+
+| | Capacidad | Para qué sirve |
+| --- | --- | --- |
+| 💬 | **Conversaciones en la terminal** | Leer, buscar, responder y abrir una interfaz de pantalla completa. |
+| 🧠 | **Memoria por contacto** | Combinar hechos, notas de relación, estilo de escritura e historial relevante. |
+| 🔌 | **Herramientas MCP** | Dar acceso a tus agentes a conversaciones, contexto, agenda y envíos. |
+| 📥 | **Bandeja y productividad** | Revisar pendientes, compromisos detectados, tareas y eventos. |
+| 🖼️ | **Archivos y multimedia** | Enviar documentos, imágenes, stickers y notas de voz con un backend configurado. |
+| ⏱️ | **Seguimiento de mensajes** | Esperar novedades con filtros y long polling, sin consultar continuamente el historial. |
 
 ## Instalación
 
-**Desde npm** (recomendado, cuando esté publicado):
+Requiere **Node.js 22.18.0 o superior**, npm y una cuenta de WhatsApp para vincular el dispositivo.
+
+### Desde npm
 
 ```bash
-npm install -g wacon
+npm install -g @josetra/wacon
+wacon --version
 ```
 
-**Directo desde GitHub** (sin esperar el registro — compila solo al instalar):
+El paquete se llama `@josetra/wacon`; el comando instalado es `wacon`.
+
+También puedes ejecutarlo sin instalación global:
+
+```bash
+npx -y @josetra/wacon login
+```
+
+### Desde GitHub
+
+Disponible para instalar directamente desde el código fuente:
 
 ```bash
 npm install -g github:JOSETRA44/wacon-mcp
 ```
 
-**Sin instalar nada** (npx):
-
-```bash
-npx wacon login
-```
-
-**Desarrollo local**:
-
-```bash
-git clone https://github.com/JOSETRA44/wacon-mcp && cd wacon-mcp
-npm install && npm link
-```
+Esta vía requiere Git y compila el proyecto durante la instalación. Wacon incluye dependencias nativas; si no hay un binario precompilado compatible con tu plataforma, la instalación puede requerir herramientas de compilación de C++.
 
 ## Primeros pasos
 
+**1. Vincula tu cuenta.**
+
 ```bash
-wacon login     # escanea el QR desde WhatsApp > Dispositivos vinculados
-wacon status    # mira cómo crece la sincronización del historial
-wacon init      # cuando haya miles de mensajes: construye persona.md y perfiles
+wacon login
 ```
 
-Después de `wacon init`, **edita `~/.wacon/persona.md` a mano**. Es la fuente de verdad de tu voz: los agentes la leen antes de cada mensaje que envían en tu nombre.
+En WhatsApp, abre **Dispositivos vinculados → Vincular un dispositivo** y escanea el QR de la terminal.
 
-## Registrar en Claude Code (u otro agente)
+**2. Comprueba la conexión y explora tus conversaciones.**
+
+```bash
+wacon status
+wacon chats
+wacon inbox
+```
+
+**3. Abre el cliente que prefieras.**
+
+```bash
+wacon chat          # Chat ligero
+wacon chat ultra    # Interfaz de pantalla completa
+wacon tui           # Alias de la interfaz de pantalla completa
+```
+
+**4. Construye tu memoria de conversación.**
+
+Cuando el historial esté sincronizado:
+
+```bash
+wacon init          # Analiza contactos
+wacon init --all    # Incluye grupos
+wacon persona      # Consulta tu perfil global
+```
+
+Revisa y edita `~/.wacon/persona.md`: define tu voz y las reglas que deben seguir los agentes. Los hechos extraídos automáticamente son candidatos de baja confianza; conviene revisarlos antes de usarlos como contexto.
+
+## Conectar un agente
+
+### Claude Code
+
+Con Wacon instalado globalmente:
 
 ```bash
 claude mcp add wacon -- wacon mcp
-# o sin instalación global:
-claude mcp add wacon -- npx -y wacon mcp
 ```
 
-Cualquier otro cliente MCP local puede conectarse de dos formas:
-
-- **stdio**: comando `wacon mcp`
-- **HTTP**: `POST http://127.0.0.1:8317/mcp` con header `Authorization: Bearer <token>` (el token vive en `~/.wacon/daemon.json`)
-
-Todos los clientes comparten la misma sesión: un daemon en background es el único dueño del socket de WhatsApp y arranca solo cuando hace falta.
-
-## Arquitectura
-
-```
-agentes (stdio/HTTP) ─┐
-                      ├─► wacon daemon ─► Baileys (1 socket WA)
-humano (CLI) ─────────┘        │
-                               ├─► ~/.wacon/wacon.db      (SQLite + FTS5)
-                               ├─► ~/.wacon/profiles/*.md (estilo por contacto)
-                               ├─► ~/.wacon/persona.md    (tu voz global)
-                               └─► ~/.wacon/auth/         (credenciales de sesión)
-```
-
-## Sistema de memoria (3 capas)
-
-| Capa | Quién la escribe | Qué contiene |
-|---|---|---|
-| Stats (frontmatter YAML) | `analyze_contact` / `wacon init` — determinístico, sin LLM | emojis, formalidad, **tuteo/usted/voseo**, idioma, uso de tildes, abreviaciones, estilo de risa, longitud, frases recurrentes, **dinámica** (latencia de respuesta, iniciativa, ráfagas) |
-| Notas cualitativas (cuerpo .md) | Agentes vía `update_contact_profile` (y tú, a mano) | dinámica de la relación, temas, bromas internas, qué evitar |
-| `persona.md` | `wacon init` + **tú** | tu voz global y reglas duras para los agentes |
-
-### Recuperación híbrida (RAG local, sin modelos externos)
-
-`recall_context` combina keyword (FTS5/BM25) + similitud semántica (vectores de n-gramas hasheados, robustos a typos: "q onda" ≈ "qué onda") + recencia, fusionados con RRF. Y **memoria episódica**: el historial se segmenta en conversaciones (>3h de silencio); los agentes las consolidan con `summarize_episode` y esos resúmenes emergen en recalls futuros. Wacon mejora con cada uso.
-
-Flujo de un agente: `get_contact_profile` → `read_messages` → `recall_context` → redactar → `send_message` → `update_contact_profile` + `summarize_episode`.
-
-## Atención y ahorro de tokens
-
-Un agente que hace polling (`list_chats` cada 30s) gasta ~100k tokens por hora para aprender "no pasó nada". Wacon invierte eso: **el daemon espera y filtra gratis**.
-
-- **`wait_for_messages`** — long-poll: bloquea server-side y responde en el instante en que llega un mensaje (o al expirar, máx 120s). La misma hora de vigilancia ≈ 2.4k tokens (~40× menos). Un `cursor` monotónico garantiza no perder ni repetir eventos.
-- **`start_watch`** — reglas declarativas (chats, keywords, grupos, prioridad mínima) + **triaje determinístico sin LLM**: cada mensaje recibe un score 0-100 (chat directo +40, te mencionan +45, contacto frecuente +20, pregunta +10…). Solo te despiertan los que importan. Expiran solas (máx 240 min).
-- **`suggest_watch_window`** — "¿vale la pena esperar aquí?" respondido con un modelo de Poisson sobre 8 semanas de tu historial. Si la franja está muerta recomienda **0 minutos** y señala la próxima ventana activa.
-- **`get_digest`** — catch-up comprimido por chat en una sola llamada.
-- **`set_presence`** — `unavailable` (default) es **modo sigilo**: recibes todo mientras apareces desconectado. Nadie ve "en línea" a las 3am porque un agente despertó. Leer nunca marca como leído: los tics azules exigen `mark_read` explícito.
-
-## Inteligencia: razonar antes de responder
-
-Memoria **bidimensional** por contacto (las dos dimensiones no se mezclan porque viven en almacenamientos distintos):
-
-- **Hechos de la persona** (dim 1) — quién es, gustos, cumpleaños, objetivos. Átomos en SQLite con dedup y detección de huecos: `remember_fact`, `get_contact_facts`. Re-registrar un hecho cambiado lo **actualiza**, no duplica.
-- **Dinámica de interacción** (dim 2) — confianza, bromas internas, tono. Markdown editable: `update_contact_profile`.
-
-**Playbook externo (NotebookLM)** para chats especiales: etiqueta un chat (`tag_chat` con `seduccion`, `ventas`, `debate`…) y Wacon consulta tus libros cargados en NotebookLM (`consult_playbook`) para dar consejos con citas, **fusionados con los hechos del contacto**. Wacon orquesta la consulta internamente vía el CLI `nlm` — cualquier agente lo aprovecha sin configurar nada. Si NotebookLM falla, **degrada** con elegancia (nunca rompe la respuesta). Configura el mapeo tag→notebook en `~/.wacon/notebooks.json`.
-
-**`prepare_reply(chat, situation)`** es el centro: **una llamada** arma el briefing completo (persona + hechos + dinámica + recall + playbook si el chat es especial) y activa "escribiendo…". Reemplaza 5 llamadas → ahorra tokens; los chats no especiales saltan NotebookLM.
-
-**`wacon doctor`** diagnostica todo: WhatsApp, DB, daemon, NotebookLM (nlm autenticado + notebooks existen) y disco.
-
-## Multimedia, tiempo y proactividad
-
-Wacon ya no es ciego, sordo ni atemporal:
-
-- **Vista y oído (agnóstico, sin inflar el paquete):** cuando un contacto manda una imagen o nota de voz, `read_messages` lo marca con un placeholder; `view_image` la devuelve como **bloque de imagen MCP** (el agente la ve con su visión nativa) y `transcribe_audio` como **bloque de audio MCP** (agentes multimodales la escuchan). Capa 2 opcional, configurable en `~/.wacon/config.json`: describir imágenes por API de visión, o transcribir audio con un endpoint compatible OpenAI (Groq/OpenAI/local) o `whisper.cpp` local — se instalan a demanda, nada pesa por defecto.
-- **Regla anti-fraude:** si algo multimedia falla (descarga rota, audio corrupto, API caída), Wacon **nunca** devuelve un error crudo al agente ni al chat; registra el error real localmente y entrega una directriz natural ("no pude escuchar esta nota de voz; pídele que te la escriba"). Revísalos con `wacon errors`.
-- **Conciencia del tiempo + agenda:** `prepare_reply` y `get_agenda` inyectan la fecha/hora actual (el agente entiende "el próximo viernes"). El agente puede `schedule_event`/`add_task`; tú los ves con **`wacon calendar`** y **`wacon tasks`**.
-- **Motor proactivo:** el daemon vigila la agenda y, a la hora de aviso de un evento, despierta a un agente que esté escuchando con **`wait_for_triggers`** (long-poll que devuelve mensajes entrantes **y** eventos vencidos). El agente decide si envía un mensaje proactivo ("Hola María, ¿sigue en pie lo de las 5?"). **El daemon nunca envía solo.** Patrón de uso: corre un agente en bucle (p.ej. `/loop` de Claude Code) llamando `wait_for_triggers`.
-
-## Análisis automatizado (fuerza bruta, sin tokens)
-
-`wacon init` ya no es solo estadísticas: es un **motor de dos niveles** que evita analizar chat por chat.
-
-- **Tier 1 (determinístico, 0 tokens):** `wacon init [all | --contacts | --groups | --courses | <chat>]` lanza un job en el daemon que, por cada chat, construye perfil de estilo+dinámica, segmenta episodios con **resúmenes extractivos**, extrae **hechos candidatos** (regex: fechas, trabajo, gustos, lugares — baja confianza, marcados `(?)`, confirmables) y recoge **accionables de grupos** (exámenes, entregas) como **sugerencias**. Con una **barra de progreso en vivo** — el humano o un agente ven el mismo avance (`analysis_status`). Probado: 67 chats reales en segundos.
-- **Tier 2 (agente, opcional y barato):** el agente llama `get_analysis_bundle(chat)` y recibe todo **pre-masticado** (estilo, hechos, candidatos, episodios, accionables) — enriquece en vez de leer el historial crudo. **Ya no hace falta un agente para tener datos**; solo para pulirlos.
-- **Sugerencias, no auto-agenda:** los accionables de grupos van a `wacon suggested`; `--confirm <id>` los promueve a evento real (el calendario nunca se llena solo).
+O usando npx:
 
 ```bash
-wacon init all          # todo (incluidos grupos), barra de progreso en vivo
-wacon init --courses    # solo grupos de cursos de la universidad
-wacon suggested         # accionables detectados; --confirm <id> para agendar
+claude mcp add wacon -- npx -y @josetra/wacon mcp
 ```
 
-## WhatsApp en la terminal
+### Otros clientes MCP
 
-```bash
-wacon chat            # cliente ligero: elige entre tus conversaciones pendientes
-wacon chat nayda      # abre una directamente
-wacon chat ultra      # app de pantalla completa (paneles, estilo WhatsApp Web)
-```
-
-**Dos clientes, un motor.** `wacon chat` es el cliente ligero (cero dependencias, ideal por SSH o un vistazo rápido). **`wacon chat ultra`** (alias `wacon tui`) abre una app de terminal de pantalla completa: lista de chats a la izquierda (ordenada por recencia, como WhatsApp Web), conversación a la derecha, y todo por teclas:
-
-| Tecla | Qué hace |
-|---|---|
-| `Ctrl+N` / `Ctrl+P` | Chat siguiente / anterior — **sin dejar de escribir** |
-| `Ctrl+K` | Buscar y saltar a un chat (también mientras escribes) |
-| `Esc` / `Tab` | Ir a la lista, justo donde te quedaste |
-| `Ctrl+O` | Adjuntar archivo — **abre un explorador**, no pide rutas |
-| `Ctrl+S` / `Ctrl+F` | Sticker / buscar en la conversación |
-| `?` | Todos los atajos · `Ctrl+C` sale |
-
-La primera vez te recibe una bienvenida que enseña lo esencial (una sola vez). En grupos cada participante tiene **su propio color y su nombre real**, y los mensajes que llegan de otros chats avisan con un aviso temporal en pantalla. Ambos clientes son pura presentación sobre el mismo daemon — nada de lógica duplicada. La app usa `neo-blessed` cargado solo al entrar a ese modo, así que ni los agentes ni el resto de comandos pagan nada.
-
-Cliente de chat en la terminal, sin abrir un navegador y **sin dependencias nuevas**. Los mensajes entrantes aparecen en vivo mientras escribes, manda "escribiendo…" como un cliente real, y el scroll y el copiar/pegar de tu terminal siguen funcionando.
-
-**Fácil de aprender usándolo.** La cabecera siempre recuerda cómo salir (`Esc volver a la lista`), y unos tips progresivos —uno por sesión, sin repetirse— te van enseñando el resto:
-
-```
-── Nayda Quispe UTP · conectado · vistos: off ──────────
-   Esc volver a la lista · /help comandos · Tab autocompletar
- 08:12 p.m.  Nayda  del sabado se traslado para domingo
- 08:13 p.m.  Nayda  [nota de voz 0:17] /ver 3
-💡 Pulsa Esc para volver a la lista de chats (o escribe /atras).
-> _
-```
-
-Si **otro contacto te escribe** te avisa con un número para saltar (`/2`), **Tab** autocompleta, y al reabrir **continúas donde lo dejaste** con enter. Dentro: `/ver <n>`, `/send <archivo>`, `/voz <texto>`, `/switch`, `/search`, `/sticker <mood>`, `/who`, `/quit`.
-
-**Imágenes y audios recibidos:** cada uno se numera y `/ver <n>` lo abre en tu visor del sistema (una terminal no puede mostrarlos bien, así que no peleamos con eso). Si tienes configurado un backend de visión o transcripción, verás además la descripción o el texto del audio directamente.
-
-## Enviar archivos
-
-```bash
-# dentro del chat
-/send C:\ruta\informe.pdf mira esto
-/send nota.ogg --voz          # nota de voz real
-```
-
-Un solo camino detecta el tipo por la extensión: **imágenes y videos** con vista previa, **audio** (o nota de voz con waveform), y **cualquier otra cosa** —PDF, Word, Excel, zip— como documento conservando su nombre. Los agentes tienen la tool MCP `send_file`, así que pueden mandar un informe o una foto igual que tú. Mismos guardrails y degradación honesta si falla.
-
-## Responder con voz
-
-```bash
-# dentro del chat
-/voz ya voy saliendo, llego en veinte minutos
-
-# o desde fuera
-wacon voice "Nayda" "oye, se me hizo tarde pero ya salgo"
-```
-
-Manda una **nota de voz real** —la burbuja redonda con onda que se reproduce dentro del chat—, no un archivo de audio adjunto. Los agentes tienen la tool `send_voice_message(chat, text)`: escriben lo que quieren decir y Wacon lo sintetiza, lo empaqueta como ogg/opus mono con su onda de 64 barras y su duración, y lo envía. El contacto ve "grabando audio…" mientras tanto, como si hubiera alguien sujetando el micro.
-
-Necesita un motor de voz en `~/.wacon/config.json` (nada viene activado por defecto):
+Añade una entrada equivalente a la configuración de tu cliente:
 
 ```json
 {
-  "tts": {
-    "backend": "openai-compatible",
-    "endpoint": "https://api.openai.com/v1/audio/speech",
-    "apiKey": "sk-…",
-    "model": "gpt-4o-mini-tts",
-    "voice": "nova",
-    "maxChars": 1200
+  "mcpServers": {
+    "wacon": {
+      "command": "npx",
+      "args": ["-y", "@josetra/wacon", "mcp"]
+    }
   }
 }
 ```
 
-Sirve cualquier endpoint compatible con OpenAI —OpenAI, Groq, o uno local tipo Kokoro/openedai-speech—, así que puedes tenerlo gratis y offline si quieres. **`ffmpeg` es opcional**: sin él la nota se envía igual (el endpoint ya devuelve opus) pero sin onda ni duración exacta; con él, además, puedes mandar como nota de voz cualquier audio que no sea opus. `wacon doctor` te dice en qué estado estás. Y si no hay motor configurado la tool **no falla**: devuelve una directriz para que el agente diga lo mismo por texto, sin comentarle nada al contacto.
+El formato exacto depende del cliente. Si en Windows necesita ejecutar npx a través del intérprete de comandos, utiliza `"command": "cmd"` y `"args": ["/c", "npx", "-y", "@josetra/wacon", "mcp"]`.
 
-**Tics azules:** Wacon respeta la privacidad de tu cuenta automáticamente — si tienes las confirmaciones de lectura desactivadas, marcar como leído no notifica al otro. La cabecera te lo muestra (`vistos: on/off`).
+También existe un endpoint HTTP local en `http://127.0.0.1:8317/mcp`. Requiere `Authorization: Bearer <token>`; el token de la sesión está en `~/.wacon/daemon.json`.
 
-## Para agentes: salida limpia con `--json`
+### Skills incluidas
 
-Todos los comandos de datos aceptan `--json`: imprimen el objeto tal cual, **sin un solo código ANSI**, para que no ensucien el contexto de un agente. También se respeta `NO_COLOR`, `--no-color` y la salida redirigida.
+El paquete contiene dos guías para agentes:
 
-```bash
-wacon inbox --json | jq '.[0].name'
-```
-
-`wacon chat` es lo único reservado a humanos (es interactivo); si un agente lo intenta con `--json`, recibe un error parseable en vez de colgarse.
-
-## Productividad: ponte al día
-
-Wacon no es solo para contestar — sirve para **organizarte**:
-
-- **`wacon inbox`** — qué te falta responder, priorizado: chats donde la otra persona habló último, ordenados por si te preguntaron algo, cuántos mensajes se acumularon y qué tan reciente es. Los **canales de WhatsApp se excluyen** (no puedes responderles; inundaban la lista con cientos de "sin responder").
-- **`wacon commitments`** — promesas que hiciste ("te aviso", "mañana te mando") y nunca seguiste. Conservador a propósito: prefiere no decir nada antes que acusarte en falso.
-- **`wacon brief`** — el "ponme al día" completo: pendientes, compromisos, qué llegó, agenda y tareas.
-
-## Perfilado de miembros de grupo
-
-Un grupo son decenas de personas y miles de mensajes. Como cada participante tiene un identificador estable, `wacon members <grupo> --analyze` construye **un perfil de estilo por persona** más los hechos que revelaron — ingesta masiva sin gastar tokens. Cuando esa persona te escriba en privado, ya hay contexto.
-
-## Stickers
-
-Donde tú pondrías un sticker, el agente ahora **elige uno y lo manda**:
-
-- **Tus propios stickers primero** (los que realmente enviaste, ya en webp), más un **pack de gatitos incluido** (10 webp 512×512 generados desde [Twemoji](https://github.com/jdecked/twemoji), CC-BY 4.0) como respaldo — sin dependencias de imagen en runtime.
-- **El significado se aprende del contexto, sin IA:** el texto anterior al sticker define su mood (tras "Perdón, me pasé" → `disculpa`; tras "jajaja" → `risa`).
-- **Cuándo enviarlo:** `list_stickers({chat})` mide tu **afinidad real** con ese contacto (con Nayda: 27% de tus mensajes son stickers → "encajan de forma natural"; si fuera <8%, el agente manda solo texto).
+- **`wacon-whatsapp`**: conversaciones, respuestas, archivos y seguimiento.
+- **`wacon-knowledge`**: análisis, perfiles, hechos y memoria episódica.
 
 ```bash
-wacon stickers --sync        # indexa pack + tus stickers
-wacon stickers -c nayda      # afinidad y moods con ese contacto
+wacon skills                   # Instala las skills sin sobrescribir las existentes
+wacon skills --force           # Actualiza las copias instaladas
+wacon skills --target ./skills # Elige otro destino
 ```
 
-## Herramientas MCP (57)
+Durante la instalación, Wacon intenta copiarlas a `~/.claude/skills/` si ya existe la configuración de Claude. Puedes omitir este paso con la variable de entorno `WACON_SKIP_POSTINSTALL=1`; también se omite en CI. El destino predeterminado se puede cambiar mediante `WACON_SKILLS_DIR`.
 
-**Sesión**: `whatsapp_status`, `whatsapp_login` (QR como imagen)
-**Lectura**: `list_chats`, `read_messages`, `search_messages`, `recall_context` (híbrido), `search_contacts`, `get_group_info`
-**Atención**: `wait_for_messages`, `start_watch`, `stop_watch`, `watch_status`, `suggest_watch_window`, `get_digest`, `set_presence`, `mark_read`
-**Memoria**: `get_contact_profile`, `update_contact_profile`, `analyze_contact`, `get_persona`, `list_episodes`, `read_episode`, `summarize_episode`, `wacon_init`
-**Inteligencia**: `prepare_reply`, `remember_fact`, `forget_fact`, `get_contact_facts`, `tag_chat`, `untag_chat`, `list_special_chats`, `consult_playbook`, `wacon_doctor`
-**Análisis**: `run_bulk_analysis`, `analysis_status`, `get_analysis_bundle`, `list_suggested_events`, `confirm_suggested_event`, `dismiss_suggested_event`, `resolve_contact`, `list_analysis_targets`
-**Stickers y archivos**: `list_stickers`, `send_sticker`, `sync_stickers`, `send_file`
-**Multimedia**: `view_image`, `transcribe_audio`, `get_error_log`
-**Tiempo/agenda**: `schedule_event`, `list_events`, `cancel_event`, `complete_event`, `add_task`, `list_tasks`, `complete_task`, `get_agenda`, `wait_for_triggers`
-**Envío**: `send_message` (con `typing_ms` para simular "escribiendo…"), `send_voice_message` (nota de voz real desde texto)
+## Uso cotidiano
 
-Más resources (`wacon://persona`, `wacon://profile/{chat}`) y el prompt `reply_in_style`.
-
-## Skill para agentes
-
-Dos skills, una por trabajo:
-
-- **`wacon-whatsapp`** — conversar: leer, responder en tu voz, stickers, proactividad.
-- **`wacon-knowledge`** — analizar: construir y mantener la base de conocimiento (análisis masivo, bundles, hechos, episodios, persona).
-
-**Se instalan solas** al hacer `npm install` (un postinstall las copia a `~/.claude/skills/`, sin sobrescribir las que ya tengas y sin romper nunca la instalación). Para hacerlo a mano o actualizarlas, un solo comando las cubre todas:
+### Leer, buscar y responder
 
 ```bash
-wacon skills            # instala todas las skills incluidas
-wacon skills --force    # sobrescribe para actualizar
+wacon contacts "Contacto"
+wacon read "Contacto" --limit 20
+wacon search "reunión"
+wacon send "Contacto" "Confirmado, nos vemos a las cinco."
 ```
 
-También `npx skills add JOSETRA44/wacon-mcp`. Viajan dentro del paquete npm (`node_modules/wacon/skills/`).
+Los comandos de envío actúan sobre WhatsApp. Para ensayar sin enviar, activa `dryRun` en la configuración.
 
-## Calidad de datos
+### Revisar pendientes
 
-La personalización solo sirve si mide bien. Wacon distingue **tu prosa real** del ruido: descarta sus propios placeholders de media, código/SQL pegado y links sueltos; quita las URLs antes de extraer vocabulario; y equilibra el muestreo por chat para que un chat pesado (un bot, un grupo enorme) no defina tu voz. Eso bajó tu longitud media medida de 162 a 53 caracteres y cambió tus "frases recurrentes" de `"not null"`/`"message id"` a `"buenas noches"`/`"muchas gracias"`. Detalle en `wacon-docs/Calidad-de-Datos.md`.
+```bash
+wacon inbox
+wacon brief
+wacon commitments
+wacon calendar --days 7
+wacon tasks
+```
 
-Tu `persona.md` ya no nace vacía: `wacon init` redacta un borrador **con evidencia** (tono, longitud, cómo te ríes, tildes, abreviaciones y ejemplos de mensajes tuyos reales) que luego editas a mano — `wacon doctor` te avisa si sigue en blanco.
+Los compromisos y las sugerencias se extraen del historial; revísalos antes de tratarlos como acuerdos confirmados.
 
-## Documentación de diseño
+### Analizar y recordar
 
-`wacon-docs/` es un vault de Obsidian con el "cerebro" del proyecto: arquitectura, decisiones, sistema de memoria y roadmap, todo enlazado con wikilinks. Ábrelo como vault en Obsidian.
+```bash
+wacon init --groups
+wacon profile "Contacto"
+wacon facts "Contacto"
+wacon suggested
+wacon suggested --confirm 12
+```
 
-## Guardrails (`~/.wacon/config.json`)
+Las sugerencias de eventos no se incorporan automáticamente a tu agenda: debes confirmarlas.
+
+### Archivos, stickers y voz
+
+Dentro del chat ligero:
+
+```text
+/send ./informe.pdf Aquí está el informe.
+/send ./nota.ogg --voz
+/voz Confirmado, nos vemos a las cinco.
+```
+
+Desde la terminal:
+
+```bash
+wacon stickers --sync
+wacon voice "Contacto" "Confirmado, nos vemos a las cinco."
+```
+
+La síntesis de voz requiere un backend configurado. Los agentes disponen de herramientas como `send_file`, `send_sticker` y `send_voice_message`.
+
+### Seguimiento y automatización
+
+```bash
+wacon watch --minutes 30 --min-priority 40
+wacon digest --minutes 60
+wacon inbox --json
+```
+
+Para scripts y agentes, los comandos de datos admiten `--json` y evitan los códigos de color. Las herramientas MCP `wait_for_messages` y `wait_for_triggers` permiten esperar novedades y recordatorios. El daemon notifica los eventos; el agente decide cómo actuar.
+
+Consulta todas las opciones con `wacon --help` o `wacon <comando> --help`.
+
+## Cómo funciona la memoria
+
+Wacon combina tres fuentes de contexto:
+
+| Fuente | Contenido |
+| --- | --- |
+| **Perfil global** | Tu voz y tus preferencias, editables en `persona.md`. |
+| **Perfil por contacto** | Estadísticas de estilo y notas sobre la relación. |
+| **Hechos e historial** | Datos estructurados, mensajes recuperados y resúmenes de episodios. |
+
+La recuperación local combina búsqueda de texto, similitud por n-gramas y recencia. No necesita un servicio externo de embeddings. El análisis inicial usa reglas y estadísticas; un agente puede enriquecer o corregir sus resultados.
+
+La herramienta MCP `prepare_reply` reúne el perfil, los hechos y el contexto relevante para preparar una respuesta.
+
+## Configuración
+
+El directorio predeterminado es `~/.wacon/` (`%USERPROFILE%\.wacon\` en Windows). Puedes cambiarlo con `WACON_HOME`.
+
+```text
+~/.wacon/
+├── auth/          Credenciales de la sesión de WhatsApp
+├── profiles/      Perfiles por contacto
+├── wacon.db       Mensajes, hechos y agenda
+├── persona.md     Tu voz y reglas para agentes
+├── config.json    Preferencias y límites
+├── notebooks.json Asociaciones con NotebookLM
+└── daemon.json    Información de conexión local
+```
+
+Ejemplo de `config.json` para probar los flujos sin realizar envíos:
 
 ```json
 {
-  "dryRun": false,              // true = los envíos se loguean pero NO salen
-  "sendRateLimitPerMinute": 10, // tope duro de envíos
-  "allowedChats": [],           // si no está vacío, SOLO se puede enviar a estos JIDs
-  "blockedChats": [],           // envíos siempre rechazados
+  "dryRun": true,
+  "sendRateLimitPerMinute": 10,
+  "allowedChats": [],
+  "blockedChats": [],
   "daemonPort": 8317
 }
 ```
 
-Recomendado para las primeras pruebas: `"dryRun": true`, o `allowedChats` con solo tu propio JID. Todo envío queda auditado en la tabla `sent_log` con el nombre del cliente que lo hizo.
+- **`dryRun`**: registra los intentos de envío sin enviarlos. Su valor predeterminado es `false`.
+- **`allowedChats`**: si contiene JIDs, limita los envíos a esos chats.
+- **`blockedChats`**: impide enviar a los JIDs indicados.
+- **`sendRateLimitPerMinute`**: limita la frecuencia de envío.
 
-## CLI
+### Integraciones opcionales
 
+| Integración | Configuración | Uso |
+| --- | --- | --- |
+| **Voz** | `tts` con un endpoint compatible con OpenAI | Convertir texto en notas de voz. |
+| **Transcripción** | `transcription` con API compatible o `whisper.cpp` | Convertir audio a texto. |
+| **Visión** | `vision` con un endpoint compatible | Describir imágenes mediante un modelo. |
+| **FFmpeg** | Disponible en PATH o mediante `ffmpegPath` | Convertir audio y preparar notas de voz. |
+| **NotebookLM** | CLI `nlm` autenticado y `notebooks.json` | Consultar fuentes asociadas a chats etiquetados. |
+
+Estas integraciones se configuran según el proveedor que utilices. Las API externas pueden tener coste y recibir el contenido que les envíes. Sin una API de visión o transcripción configurada, las herramientas MCP pueden entregar imágenes o audio al cliente para que use sus propias capacidades multimodales.
+
+## Arquitectura y privacidad
+
+```text
+Terminal / cliente MCP
+          │
+          ▼
+   Daemon local de Wacon
+          ├── Sesión de WhatsApp mediante Baileys
+          ├── SQLite: mensajes, memoria y agenda
+          ├── Perfiles Markdown
+          └── Integraciones opcionales
 ```
-wacon login | logout | status | presence <available|unavailable> | doctor
-wacon chats | read <chat> | send <chat> <texto> | search <query> | contacts <nombre>
-wacon watch [-m 30] [-p 40] [-g] | digest [-m 60] | window
-wacon init | profile <chat> [--note "..."] | persona
-wacon facts <chat> [--add "..." --category ...] | tag <chat> <tag> | untag | special
-wacon playbook <chat> "<situación>"
-wacon chat [contacto] | chat ultra | tui   # cliente ligero / app pantalla completa (humanos)
-wacon inbox | commitments | brief | members <grupo> [--analyze]
-wacon calendar [-d 30] | tasks | errors [--tail 20] | skills [--force]
-wacon daemon start|stop|log | config | mcp
+
+El daemon comparte una sesión entre clientes, escucha en `127.0.0.1` y requiere un token de acceso. Los mensajes, perfiles y análisis se almacenan localmente. Al conectar un agente o habilitar un servicio externo, el contenido solicitado puede ser procesado por ese cliente o proveedor.
+
+Las credenciales de WhatsApp se guardan en el directorio `auth/` sin cifrado adicional de Wacon. Protege ese directorio y no lo incluyas en repositorios ni archivos compartidos.
+
+## Diagnóstico
+
+```bash
+wacon doctor
+wacon errors --tail 20
+wacon daemon log
 ```
 
-`wacon doctor` verifica que todo (incluido NotebookLM) esté sano; `wacon playbook` consulta tus libros de persuasión para un chat especial.
+`wacon doctor` comprueba el estado local y las integraciones. Para reiniciar el daemon puedes usar `wacon daemon-restart`. Si necesitas volver a vincular la cuenta, revisa primero el diagnóstico y luego ejecuta `wacon login`.
 
-`wacon watch` es vigilancia en vivo en la terminal con triaje por prioridad; `wacon window` te dice si vale la pena estar en línea ahora mismo.
+## Desarrollo
 
-## Seguridad
+```bash
+git clone https://github.com/JOSETRA44/wacon-mcp.git
+cd wacon-mcp
+npm ci
+npm run check
+npm link
+```
 
-- El daemon escucha solo en `127.0.0.1` y exige un token aleatorio por sesión.
-- Las credenciales de WhatsApp viven en `~/.wacon/auth/` **en claro** (igual que en cualquier setup Baileys): protege tu cuenta de usuario de Windows.
-- Nada sale de tu máquina: mensajes, perfiles y análisis son 100% locales.
+| Comando | Función |
+| --- | --- |
+| `npm run dev` | Compilar al cambiar los archivos. |
+| `npm run typecheck` | Verificar tipos de TypeScript. |
+| `npm test` | Ejecutar la suite de pruebas. |
+| `npm run build` | Generar los ejecutables en `dist/`. |
+| `npm run check` | Ejecutar tipos, pruebas y compilación. |
+
+Las notas de arquitectura y diseño están en [wacon-docs](https://github.com/JOSETRA44/wacon-mcp/tree/main/wacon-docs). Para preparar una versión y configurar la publicación, consulta la [guía de releases](https://github.com/JOSETRA44/wacon-mcp/blob/main/docs/RELEASING.md).
+
+Para reportar un problema, incluye la versión de Wacon, Node.js, el sistema operativo y los pasos para reproducirlo en [Issues](https://github.com/JOSETRA44/wacon-mcp/issues). Elimina teléfonos, mensajes privados, tokens y credenciales de los registros que compartas.
+
+## Proyecto y licencia
+
+Wacon es un proyecto independiente que usa [Baileys](https://github.com/WhiskeySockets/Baileys) para integrarse con WhatsApp. No es una aplicación oficial ni está afiliada a WhatsApp o Meta; el uso de clientes no oficiales puede afectar la disponibilidad de la cuenta.
+
+Publicado bajo la [licencia MIT](LICENSE). Los stickers incluidos derivan de [Twemoji](https://github.com/jdecked/twemoji), con licencia CC BY 4.0; su atribución se conserva en el [manifest del pack](assets/stickers/cats/manifest.json).
