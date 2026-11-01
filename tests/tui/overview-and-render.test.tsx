@@ -121,6 +121,29 @@ describe("App render", () => {
     ui.unmount();
   });
 
+  it("/voz in the composer sends a voice note instead of text", async () => {
+    const voices: string[] = [];
+    const texts: string[] = [];
+    const c = new UltraController(fakeGateway({
+      sendVoice: async (_j, t) => (voices.push(t), { ok: true, messageId: "v", seconds: 3 }),
+      sendText: async (_j, t) => (texts.push(t), { ok: true, messageId: "t" }),
+    }));
+    const ui = render(<App controller={c} files={files} />);
+    await c.start();
+    await settle();
+    ui.stdin.write(ENTER);
+    await settle();
+    for (const ch of "/voz ya voy") ui.stdin.write(ch);
+    await settle();
+    expect(ui.lastFrame() ?? "").toContain("nota de voz");
+    ui.stdin.write(ENTER);
+    await settle();
+    expect(voices).toEqual(["ya voy"]);
+    expect(texts).toEqual([]);
+    c.stop();
+    ui.unmount();
+  });
+
   it("without a session shows the linking steps instead of an empty app", async () => {
     let calls = 0;
     const c = new UltraController(
