@@ -7,7 +7,8 @@ import { loadConfig } from "../core/config.js";
 import { localApi, type WaconApi } from "../mcp/api.js";
 import { buildMcpServer } from "../mcp/server.js";
 import { writeDaemonInfo, clearDaemonInfo, newToken } from "./lifecycle.js";
-import { ensureDirs } from "../core/paths.js";
+import { AUTH_DIR, ensureDirs } from "../core/paths.js";
+import { readSelfIdentity } from "../core/auth-state.js";
 
 const RPC_METHODS = new Set<keyof WaconApi>([
   "status",
@@ -15,7 +16,12 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "listChats",
   "chatOverview",
   "readMessages",
+  "messagesByIds",
+  "messageStatuses",
+  "react",
+  "messageReactions",
   "searchMessages",
+  "findLinks",
   "searchContacts",
   "recall",
   "listEpisodes",
@@ -65,6 +71,8 @@ const RPC_METHODS = new Set<keyof WaconApi>([
   "listSuggestedEvents",
   "confirmSuggestedEvent",
   "dismissSuggestedEvent",
+  "dismissStaleSuggestions",
+  "staleSuggestionCount",
   "readReceiptsMode",
   "contactPresence",
   "inbox",
@@ -182,6 +190,9 @@ export async function runDaemon(): Promise<void> {
   const indexed = store.backfillVectors();
   if (indexed > 0) console.log(`[wacon] memory index: vectorized ${indexed} messages`);
 
+  // Pin our own identity BEFORE any heuristic runs, so none can claim it.
+  const me = readSelfIdentity(AUTH_DIR);
+  store.setSelf(me.pn, me.lid);
   const linked = store.backfillJidMapFromGreetings();
   if (linked > 0) console.log(`[wacon] @lid map: linked ${linked} contacts to their chats`);
 

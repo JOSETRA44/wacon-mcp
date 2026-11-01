@@ -43,8 +43,23 @@ export class DaemonClient implements WaconApi {
   chatOverview(limit?: number): ReturnType<WaconApi["chatOverview"]> {
     return this.rpc("chatOverview", [limit]);
   }
+  react(chat: string, messageId: string, emoji: string, clientName: string): ReturnType<WaconApi["react"]> {
+    return this.rpc("react", [chat, messageId, emoji, clientName]);
+  }
+  messageReactions(chat: string, ids: string[]): ReturnType<WaconApi["messageReactions"]> {
+    return this.rpc("messageReactions", [chat, ids]);
+  }
+  messageStatuses(ids: string[]): ReturnType<WaconApi["messageStatuses"]> {
+    return this.rpc("messageStatuses", [ids]);
+  }
+  messagesByIds(chat: string, ids: string[]): ReturnType<WaconApi["messagesByIds"]> {
+    return this.rpc("messagesByIds", [chat, ids]);
+  }
   readMessages(chat: string, limit?: number, beforeTs?: number): ReturnType<WaconApi["readMessages"]> {
     return this.rpc("readMessages", [chat, limit, beforeTs]);
+  }
+  findLinks(opts: Parameters<WaconApi["findLinks"]>[0]): ReturnType<WaconApi["findLinks"]> {
+    return this.rpc("findLinks", [opts]);
   }
   searchMessages(query: string, chat?: string, limit?: number): ReturnType<WaconApi["searchMessages"]> {
     return this.rpc("searchMessages", [query, chat, limit]);
@@ -67,8 +82,8 @@ export class DaemonClient implements WaconApi {
   groupInfo(groupJid: string): ReturnType<WaconApi["groupInfo"]> {
     return this.rpc("groupInfo", [groupJid]);
   }
-  send(chat: string, text: string, clientName: string, typingMs?: number): ReturnType<WaconApi["send"]> {
-    return this.rpc("send", [chat, text, clientName, typingMs]);
+  send(chat: string, text: string, clientName: string, typingMs?: number, replyTo?: string): ReturnType<WaconApi["send"]> {
+    return this.rpc("send", [chat, text, clientName, typingMs, replyTo]);
   }
   startWatch(rule: Parameters<WaconApi["startWatch"]>[0], durationMinutes: number, clientName: string): ReturnType<WaconApi["startWatch"]> {
     return this.rpc("startWatch", [rule, durationMinutes, clientName]);
@@ -195,6 +210,12 @@ export class DaemonClient implements WaconApi {
   }
   confirmSuggestedEvent(id: number, notifyBeforeMinutes?: number): ReturnType<WaconApi["confirmSuggestedEvent"]> {
     return this.rpc("confirmSuggestedEvent", [id, notifyBeforeMinutes]);
+  }
+  dismissStaleSuggestions(days?: number): ReturnType<WaconApi["dismissStaleSuggestions"]> {
+    return this.rpc("dismissStaleSuggestions", [days]);
+  }
+  staleSuggestionCount(days?: number): ReturnType<WaconApi["staleSuggestionCount"]> {
+    return this.rpc("staleSuggestionCount", [days]);
   }
   dismissSuggestedEvent(id: number): ReturnType<WaconApi["dismissSuggestedEvent"]> {
     return this.rpc("dismissSuggestedEvent", [id]);
