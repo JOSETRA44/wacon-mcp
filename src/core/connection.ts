@@ -75,6 +75,15 @@ function extractMedia(msg: WAMessage): { stub: Omit<MediaRow, "chat_jid" | "msg_
   return { stub, placeholder };
 }
 
+/** The message a reply quotes, as much as WhatsApp needs to render the quote. */
+export interface QuotedRef {
+  id: string;
+  fromMe: boolean;
+  /** Author in a group; null in a 1:1. */
+  participant: string | null;
+  text: string | null;
+}
+
 export type ConnectionState = "disconnected" | "connecting" | "waiting_qr" | "connected" | "logged_out";
 
 interface ConnectionEvents {
@@ -90,7 +99,7 @@ function toMillis(ts: number | { toNumber(): number } | null | undefined): numbe
 }
 
 /** Extract displayable text from any WhatsApp message shape. */
-function extractText(msg: WAMessage): { text: string | null; type: string; quotedId: string | null } {
+export function extractText(msg: WAMessage): { text: string | null; type: string; quotedId: string | null } {
   const content = msg.message;
   if (!content) return { text: null, type: "unknown", quotedId: null };
   const type = getContentType(content) ?? "unknown";
@@ -101,7 +110,17 @@ function extractText(msg: WAMessage): { text: string | null; type: string; quote
     content.videoMessage?.caption ??
     content.documentMessage?.caption ??
     null;
-  const quotedId = content.extendedTextMessage?.contextInfo?.stanzaId ?? null;
+  // A reply can be ANY kind of message (a photo answering a question, a voice
+  // note answering a photo); each carries contextInfo on its own node. Reading
+  // only extendedTextMessage lost every non-text reply.
+  let quotedId: string | null = null;
+  for (const node of Object.values(content)) {
+    const id = (node as { contextInfo?: { stanzaId?: string | null } } | null)?.contextInfo?.stanzaId;
+    if (id) {
+      quotedId = id;
+      break;
+    }
+  }
   return { text, type: type.replace(/Message$/, ""), quotedId };
 }
 
@@ -134,6 +153,8 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
   state: ConnectionState = "disconnected";
   latestQr: string | null = null;
   selfJid: string | null = null;
+  /** Our own @lid — WhatsApp now files the "message yourself" chat under it. */
+  selfLid: string | null = null;
   /**
    * Last credential read/write problem, surfaced by `wacon doctor`. A live
    * socket keeps working on creds it already loaded, so this is the only
@@ -210,6 +231,10 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
       if (connection === "open") {
         this.reconnectAttempts = 0;
         this.selfJid = socket.user?.id ? jidNormalizedUser(socket.user.id) : null;
+        const lid = (socket.user as { lid?: string } | undefined)?.lid;
+        this.selfLid = lid ? jidNormalizedUser(lid) : null;
+        this.store.setSelf(this.selfJid, this.selfLid);
+        this.syncArchiveStateOnce(socket);
         this.setState("connected");
       }
       if (connection === "close") {
@@ -245,6 +270,7 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
           unreadCount: chat.unreadCount ?? undefined,
           lastMessageTs: chat.conversationTimestamp ? toMillis(chat.conversationTimestamp) : null,
         });
+        if (typeof chat.archived === "boolean") this.store.setArchived(chat.id, chat.archived);
       }
       for (const contact of contacts) this.linkContact(contact);
       this.store.insertMessages(messages.map((m) => this.toRow(m)).filter((m): m is MessageRow => m !== null));
@@ -252,6 +278,7 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
       // history (stickers, images, audio) would have no downloadable stub.
       for (const msg of messages) {
         this.captureAltMapping(msg);
+        this.captureReaction(msg);
         const row = this.toRow(msg);
         if (!row) continue;
         // History-synced messages carry pushName too, same as live ones —
@@ -272,6 +299,17 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
       if (m?.lid && m?.pn) this.store.mapJids(m.lid, m.pn);
     });
 
+    // Receipts: how far each of OUR messages got (server → phone → read).
+    // Without this the app could only ever say "sent", even when the phone
+    // never received the message — exactly how a lost video went unnoticed.
+    socket.ev.on("messages.update", (updates) => {
+      for (const { key, update } of updates) {
+        const status = typeof update?.status === "number" ? update.status : null;
+        if (!key?.remoteJid || !key.id || status === null || !key.fromMe) continue;
+        this.store.updateMessageStatus(key.remoteJid, key.id, status);
+      }
+    });
+
     socket.ev.on("chats.upsert", (chats) => {
       for (const chat of chats) {
         if (!chat.id) continue;
@@ -281,6 +319,18 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
           unreadCount: chat.unreadCount ?? undefined,
           lastMessageTs: chat.conversationTimestamp ? toMillis(chat.conversationTimestamp) : null,
         });
+        if (typeof chat.archived === "boolean") this.store.setArchived(chat.id, chat.archived);
+      }
+    });
+
+    // Archiving on the phone is an app-state change: it only ever arrived
+    // here, and nothing listened — archived chats sat in the main list.
+    socket.ev.on("chats.update", (updates) => {
+      for (const u of updates) {
+        if (u.id && typeof u.archived === "boolean") {
+          this.store.setArchived(u.id, u.archived);
+          this.archiveEvents[u.archived ? "archived" : "unarchived"]++;
+        }
       }
     });
 
@@ -305,9 +355,11 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
     socket.ev.on("messages.upsert", ({ messages, type }) => {
       for (const msg of messages) {
         this.captureAltMapping(msg);
+        this.captureReaction(msg);
         const row = this.toRow(msg);
         if (!row) continue;
         this.store.insertMessage(row);
+        if (row.from_me && typeof msg.status === "number") this.store.updateMessageStatus(row.chat_jid, row.id, msg.status);
         this.store.upsertChat({ jid: row.chat_jid, lastMessageTs: row.timestamp });
         // Only live arrivals ("notify") count; "append" is backfill of
         // messages the phone already knew about. Answering from any device
@@ -343,12 +395,44 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
     const lid = contact.lid ?? (contact.id?.endsWith("@lid") ? contact.id : undefined);
     if (contact.id) this.store.upsertContact({ jid: contact.id, name, notifyName: notify });
     if (pn && lid) {
-      this.store.mapJids(lid, pn);
+      // A refused pair (one half is us) must not mirror its name either.
+      if (!this.store.mapJids(lid, pn)) return;
       // Mirror the name onto both identities and onto the @lid chat.
       this.store.upsertContact({ jid: pn, name, notifyName: notify });
       this.store.upsertContact({ jid: lid, name, notifyName: notify });
       if (name) this.store.upsertChat({ jid: lid, name });
     }
+  }
+
+  /**
+   * Chats archived before Wacon listened for it are only in the phone's app
+   * state. Re-reading that collection once from scratch replays every
+   * archive action as chats.update. Flagged so it runs a single time.
+   */
+  /** How many archive changes arrived (diagnostics for the one-off sync). */
+  private archiveEvents = { archived: 0, unarchived: 0 };
+
+  private syncArchiveStateOnce(socket: ReturnType<typeof makeWASocket>): void {
+    if (this.store.getMeta("archive_resync_v3")) return;
+    const s = socket as unknown as {
+      resyncAppState?: (c: string[], initial: boolean) => Promise<void>;
+      authState?: { keys: { set: (d: Record<string, Record<string, null>>) => Promise<void> } };
+    };
+    if (!s.resyncAppState || !s.authState) return;
+    // Archive actions live in the "regular_low" collection. Forgetting its
+    // stored version makes Baileys fetch the full snapshot and replay every
+    // action. Not as an "initial sync": those chat updates wait on a history
+    // that never comes and are silently dropped.
+    setTimeout(() => {
+      void (async () => {
+        await s.authState!.keys.set({ "app-state-sync-version": { regular_low: null } });
+        await s.resyncAppState!(["regular_low"], false);
+        this.store.setMeta("archive_resync_v3", String(Date.now()));
+        // Baileys flushes its event buffer after the call returns.
+        await new Promise((r) => setTimeout(r, 3000));
+        console.log(`[wacon] archivados sincronizados: ${this.store.archivedCount()} (eventos: ${this.archiveEvents.archived} archivar, ${this.archiveEvents.unarchived} desarchivar)`);
+      })().catch((e: unknown) => console.error(`[wacon] no pude sincronizar los archivados: ${e instanceof Error ? e.message : String(e)}`));
+    }, 8_000).unref?.();
   }
 
   /** Every 1:1 message carries the counterpart address in key.remoteJidAlt. */
@@ -362,6 +446,24 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
     };
     pair(key.remoteJid, key.remoteJidAlt);
     pair(key.participant, key.participantAlt);
+  }
+
+  /**
+   * A reaction is a message whose payload points at another message. Store it
+   * as (target, reactor, emoji) — the `reaction` row in messages carries none
+   * of that, which is why reactions could never be shown before.
+   */
+  private captureReaction(msg: WAMessage): void {
+    const r = msg.message?.reactionMessage;
+    const chatJid = msg.key.remoteJid;
+    if (!r?.key?.id || !chatJid) return;
+    const fromMe = !!msg.key.fromMe;
+    const key = msg.key as { participant?: string | null; participantAlt?: string | null };
+    const sender = fromMe ? this.selfJid : chatJid.endsWith("@g.us") ? (key.participant ?? key.participantAlt ?? null) : chatJid;
+    if (!sender) return;
+    const ms = r.senderTimestampMs;
+    const timestamp = ms ? (typeof ms === "number" ? ms : Number(ms.toString())) : toMillis(msg.messageTimestamp);
+    this.store.upsertReaction({ chatJid, targetId: r.key.id, senderJid: sender, fromMe, emoji: r.text ?? "", timestamp });
   }
 
   private cacheMessage(chatJid: string, id: string, msg: WAMessage): void {
@@ -470,14 +572,24 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
    * @param typingMs simulate typing for this long before sending. Real people
    *   don't reply instantly with a paragraph; the contact sees "escribiendo...".
    */
-  async sendText(chatJid: string, text: string, typingMs = 0): Promise<{ id: string | null }> {
+  async sendText(chatJid: string, text: string, typingMs = 0, quoted?: QuotedRef): Promise<{ id: string | null }> {
     const socket = this.requireSocket();
     if (typingMs > 0) {
       await socket.sendPresenceUpdate("composing", chatJid);
       await new Promise((r) => setTimeout(r, Math.min(typingMs, 15_000)));
       await socket.sendPresenceUpdate("paused", chatJid);
     }
-    const result = await socket.sendMessage(chatJid, { text });
+    // Baileys builds the quote's contextInfo from a WAMessage; a minimal one
+    // (key + text) is enough for the phone to show "↩ Ana: …" above the reply.
+    const options = quoted
+      ? {
+          quoted: {
+            key: { remoteJid: chatJid, id: quoted.id, fromMe: quoted.fromMe, participant: quoted.participant ?? undefined },
+            message: { conversation: quoted.text ?? "" },
+          } as WAMessage,
+        }
+      : undefined;
+    const result = await socket.sendMessage(chatJid, { text }, options);
     return { id: result?.key?.id ?? null };
   }
 
@@ -503,6 +615,15 @@ export class WhatsAppConnection extends EventEmitter<ConnectionEvents> {
   async sendMedia(chatJid: string, content: Record<string, unknown>): Promise<{ id: string | null }> {
     const socket = this.requireSocket();
     const result = await socket.sendMessage(chatJid, content as never);
+    return { id: result?.key?.id ?? null };
+  }
+
+  /** React to a message; an empty emoji removes the reaction. */
+  async react(chatJid: string, target: { id: string; fromMe: boolean; participant: string | null }, emoji: string): Promise<{ id: string | null }> {
+    const socket = this.requireSocket();
+    const result = await socket.sendMessage(chatJid, {
+      react: { text: emoji, key: { remoteJid: chatJid, id: target.id, fromMe: target.fromMe, participant: target.participant ?? undefined } },
+    });
     return { id: result?.key?.id ?? null };
   }
 
