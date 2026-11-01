@@ -12,4 +12,6 @@ export default defineConfig({
   splitting: false,
   sourcemap: true,
   banner: { js: "#!/usr/bin/env node" },
+  // Native (and optional): must be resolved at runtime, never bundled.
+  external: ["sharp"],
 });
