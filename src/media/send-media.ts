@@ -74,17 +74,33 @@ export function prepareMedia(filePath: string, maxBytes: number): PreparedMedia 
  */
 export function toMessageContent(
   media: PreparedMedia,
-  opts: { caption?: string; asVoiceNote?: boolean } = {}
+  opts: { caption?: string; asVoiceNote?: boolean; jpegThumbnail?: Buffer; seconds?: number } = {}
 ): Record<string, unknown> {
   const caption = opts.caption?.trim() || undefined;
   switch (media.kind) {
     case "image":
       return { image: media.buffer, caption, mimetype: media.mimetype };
     case "video":
-      return { video: media.buffer, caption, mimetype: media.mimetype };
+      return {
+        video: media.buffer,
+        caption,
+        mimetype: media.mimetype,
+        ...(opts.jpegThumbnail ? { jpegThumbnail: opts.jpegThumbnail } : {}),
+        ...(opts.seconds ? { seconds: opts.seconds } : {}),
+      };
     case "audio":
       return { audio: media.buffer, mimetype: media.mimetype, ptt: opts.asVoiceNote === true };
     default:
       return { document: media.buffer, fileName: media.fileName, mimetype: media.mimetype, caption };
   }
+}
+
+/**
+ * Baileys stages every upload in the temp folder: an encrypted copy plus the
+ * original (~2x the file). On a full disk those copies are cut short and the
+ * phone silently drops the message, while the server still acks it — the
+ * "sent but never arrived" video. Bytes needed before trying.
+ */
+export function stagingBytesNeeded(fileBytes: number): number {
+  return fileBytes * 3 + 64 * 1024 * 1024;
 }
