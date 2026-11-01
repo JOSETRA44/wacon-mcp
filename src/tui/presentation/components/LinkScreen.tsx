@@ -2,7 +2,7 @@ import { useMemo, type ReactNode } from "react";
 import { Box, Text } from "ink";
 import qrcodeTerminal from "qrcode-terminal";
 import type { UltraState } from "../../application/controller.js";
-import { theme } from "../theme.js";
+import { useTheme } from "../themes.js";
 import { Spinner } from "./Spinner.js";
 
 function renderQr(qr: string): string[] {
@@ -18,6 +18,7 @@ function renderQr(qr: string): string[] {
  * rotates it, and the app continues by itself the moment it is scanned.
  */
 export function LinkScreen({ link, width, height }: { link: UltraState["link"]; width: number; height: number }) {
+  const theme = useTheme().c;
   const qrLines = useMemo(() => (link.qr ? renderQr(link.qr) : []), [link.qr]);
   const qrW = qrLines.reduce((n, l) => Math.max(n, l.length), 0);
   const fits = qrLines.length + 6 <= height && qrW + 4 <= width;

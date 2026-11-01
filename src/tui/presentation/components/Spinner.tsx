@@ -1,5 +1,5 @@
 import { Text, useAnimation } from "ink";
-import { SPINNER } from "../theme.js";
+import { SPINNER } from "../themes.js";
 
 /** Braille spinner. Ink shares one timer across every animated component. */
 export function Spinner({ color, active = true }: { color?: string; active?: boolean }) {
