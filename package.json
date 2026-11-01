@@ -25,7 +25,11 @@
     "claude"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.18.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "bin": {
     "wacon": "dist/index.js"
@@ -43,16 +47,17 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "check": "npm run typecheck && npm test && npm run build",
     "prepare": "tsup",
     "postinstall": "node scripts/postinstall.mjs",
     "prepublishOnly": "npm run typecheck && npm test"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@whiskeysockets/baileys": "^7.0.0-rc.3",
     "better-sqlite3": "^12.11.1",
     "commander": "^13.1.0",
-    "express": "^4.21.0",
+    "express": "^4.22.3",
     "gray-matter": "^4.0.3",
     "ink": "^7.1.1",
     "neo-blessed": "^0.2.0",
@@ -63,7 +68,7 @@
     "react": "^19.3.1",
     "sixel": "^0.16.0",
     "string-width": "^8.3.0",
-    "zod": "^3.24.0"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
@@ -74,11 +79,11 @@
     "@types/qrcode-terminal": "^0.12.2",
     "@types/react": "^19.3.0",
     "ink-testing-library": "^4.0.0",
-    "tsup": "^8.4.0",
+    "tsup": "^9.0.0",
     "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "vitest": "^5.0.5"
   },
   "optionalDependencies": {
-    "sharp": "^0.35.3"
+    "sharp": "^0.35.5"
   }
 }
