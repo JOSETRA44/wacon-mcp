@@ -169,7 +169,9 @@ export class CodexSession extends PerTurnSession {
     // --ignore-user-config: the user's other MCP servers and coding profile
     // don't belong in a chat question (login lives in auth.json, not config).
     // "Solo Wacon" leaves the user's config (other MCP servers, profiles) out.
-    const common = ["--json", "--skip-git-repo-check", ...(o.power === "wacon" ? ["--ignore-user-config"] : []), "-s", "read-only", ...(o.model ? ["-m", o.model] : []), ...config];
+    // The sandbox goes as config, not `-s`: `codex exec resume` rejects `-s`
+    // ("unexpected argument '-s'"), so every follow-up turn used to fail.
+    const common = ["--json", "--skip-git-repo-check", ...(o.power === "wacon" ? ["--ignore-user-config"] : []), "-c", `sandbox_mode="read-only"`, ...(o.model ? ["-m", o.model] : []), ...config];
     return this.sessionId ? ["exec", "resume", this.sessionId, ...common, "-"] : ["exec", ...common, "-C", o.cwd, "-"];
   }
 
