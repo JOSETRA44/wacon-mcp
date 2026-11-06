@@ -208,9 +208,15 @@ describe("stream runtimes (Claude Code, Codex)", () => {
     const c = new TestCodex({ id: "codex", name: "Codex", protocol: "codex-json", command: "codex.exe", version: "0.1" }, opts, (e) => events.push(e));
     const first = c.argv();
     expect(first.slice(0, 2)).toEqual(["exec", "--json"]);
-    expect(first).toEqual(expect.arrayContaining(["-s", "read-only", 'mcp_servers.wacon.default_tools_approval_mode="approve"', "mcp_servers.wacon.command=\"C:/node/node.exe\"", 'mcp_servers.wacon.args=["C:/w/dist/index.js","mcp","--toolset","tui"]', "-"]));
+    expect(first).not.toContain("-s");
+    expect(first).toEqual(expect.arrayContaining(['sandbox_mode="read-only"', 'mcp_servers.wacon.default_tools_approval_mode="approve"', "mcp_servers.wacon.command=\"C:/node/node.exe\"", 'mcp_servers.wacon.args=["C:/w/dist/index.js","mcp","--toolset","tui"]', "-"]));
     c.feed({ type: "thread.started", thread_id: "th1" });
     expect(c.argv().slice(0, 3)).toEqual(["exec", "resume", "th1"]);
+    // Follow-up turns resume: only options `codex exec resume` accepts.
+    const resume = c.argv();
+    expect(resume).not.toContain("-s");
+    expect(resume).not.toContain("-C");
+    expect(resume).toContain('sandbox_mode="read-only"');
     c.feed({ type: "item.started", item: { id: "i1", type: "mcp_tool_call", server: "wacon", tool: "search_messages", arguments: '{"query":"viaje"}', status: "in_progress" } });
     c.feed({ type: "item.completed", item: { id: "i1", type: "mcp_tool_call", server: "wacon", tool: "search_messages", arguments: { query: "viaje" }, result: { content: [{ type: "text", text: "[]" }] }, status: "completed" } });
     c.feed({ type: "item.completed", item: { id: "i2", type: "agent_message", text: "Nada sobre el viaje." } });
@@ -405,4 +411,21 @@ describe("Modo IA in the app", () => {
     agent.stop();
     ui.unmount();
   });
+});
+
+describe("Codex flags match the installed CLI", () => {
+  const codex = findOnPath("codex");
+  it.skipIf(!codex)("every flag Wacon passes to `codex exec` and `codex exec resume` exists there", async () => {
+    const { execFileSync } = await import("node:child_process");
+    const help = (args: string[]) => execFileSync(codex!, [...args, "--help"], { encoding: "utf8", timeout: 30_000 });
+    const flagsIn = (text: string) => new Set([...text.matchAll(/(?:^|\s)(-{1,2}[a-zA-Z][\w-]*)/g)].map((m) => m[1]!));
+    const opts = { cwd: "C:/x", mcp: { command: "node", args: ["w", "mcp"], env: { A: "1" } }, model: "m" };
+    const s = new TestCodex({ id: "codex", name: "Codex", protocol: "codex-json", command: codex!, version: "1" }, opts, () => undefined);
+    const used = (argv: string[]) => argv.filter((a) => /^-{1,2}[a-zA-Z]/.test(a));
+    const exec = flagsIn(help(["exec"]));
+    for (const f of used(s.argv())) expect(exec.has(f), `codex exec ${f}`).toBe(true);
+    s.feed({ type: "thread.started", thread_id: "t" });
+    const resume = flagsIn(help(["exec", "resume"]));
+    for (const f of used(s.argv())) expect(resume.has(f), `codex exec resume ${f}`).toBe(true);
+  }, 60_000);
 });

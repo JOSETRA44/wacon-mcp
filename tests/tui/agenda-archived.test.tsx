@@ -76,7 +76,8 @@ describe("archived chats", () => {
 
 class FakeAgenda implements AgendaGateway {
   data: AgendaData = {
-    events: [{ id: 1, title: "Examen de Micro", startTs: Date.now() + 26 * 3600_000, chatJid: "g@g.us", status: "scheduled", notes: null }],
+    // Tomorrow 10:00: a fixed hour keeps the row text the same whatever day the tests run.
+    events: [{ id: 1, title: "Examen de Micro", startTs: (() => { const d = new Date(); d.setDate(d.getDate() + 1); d.setHours(10, 0, 0, 0); return d.getTime(); })(), chatJid: "g@g.us", status: "scheduled", notes: null }],
     tasks: [{ id: 7, title: "Llenar el sheet de asistencia", dueTs: null, chatJid: null, notes: null }],
     staleSuggestions: 152,
     commitments: [{ chatJid: "a@lid", name: "Ana", text: "te mando el informe mañana", ageDays: 2 }],
@@ -143,7 +144,7 @@ describe("chat list with Wacon IA, Agenda and Archivados", () => {
     expect(frame).toContain("Wacon IA");
     expect(frame).toContain("Agenda");
     expect(frame).toContain("Archivados");
-    expect(frame).toContain("· Examen"); // the Agenda row previews the next item
+    expect(frame).toContain("Mañana 10:00 · Examen"); // the Agenda row previews the next item
     expect(frame).toContain("Ana");
     expect(frame).not.toContain("PERU VENTAS · ");
     // Open Archivados: the archived group shows, Esc goes back.
