@@ -45,6 +45,8 @@ wacon --version
 
 El paquete se llama `@josetra/wacon`; el comando instalado es `wacon`.
 
+> **Windows:** si la instalación intenta compilar y falla buscando Python o Visual Studio, actualiza npm (`npm install -g npm@latest`) y repite la instalación. Es un fallo conocido de npm 10 con binarios que ya vienen incluidos en el paquete; no necesitas instalar ninguna herramienta de compilación.
+
 También puedes ejecutarlo sin instalación global:
 
 ```bash

@@ -21,6 +21,13 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      # Same npm as the publish workflow. npm 10 (bundled with Node 22)
+      # ignores better-sqlite3 v13's "gypfile": false on Windows and runs
+      # an implicit node-gyp rebuild for a binary that already ships in
+      # the package (npm/cli#9837); its old node-gyp then fails to find
+      # Visual Studio on current runner images.
+      - name: Install npm 11
+        run: npm install -g npm@11
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
