@@ -11,7 +11,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node: [22, 24]
+        node: [22, 24, 26]
     runs-on: ${{ matrix.os }}
     env:
       WACON_SKIP_POSTINSTALL: "1"
@@ -30,5 +30,10 @@ jobs:
         shell: bash
         run: |
           package_file=$(npm pack --ignore-scripts --json | node -e "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>console.log(JSON.parse(s)[0].filename))")
-          npm install --prefix "$RUNNER_TEMP/wacon-smoke" "$PWD/$package_file"
+          # --ignore-scripts on purpose: the SQLite binary ships inside the
+          # better-sqlite3 package (N-API, since v13), so a user install must
+          # work even when no install script runs and no build tools exist.
+          # If a native dependency ever goes back to download/compile at
+          # install time, this step goes red.
+          npm install --ignore-scripts --prefix "$RUNNER_TEMP/wacon-smoke" "$PWD/$package_file"
           node scripts/smoke-package.mjs "$RUNNER_TEMP/wacon-smoke/node_modules/@josetra/wacon"
