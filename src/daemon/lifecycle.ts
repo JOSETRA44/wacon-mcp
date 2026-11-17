@@ -142,13 +142,18 @@ function describeBootCrash(code: number, logOffset: number): string {
   } catch {
     // unreadable log — fall back to the generic message below
   }
-  // Two shapes of the same problem: a binary built for another Node ABI, or
-  // no binary at all (what a failed `npm rebuild` leaves behind).
+  // Native SQLite failed to load. Since better-sqlite3 v13 the binary is
+  // N-API (ABI-stable) and ships inside the npm package itself, so this no
+  // longer means "your Node is too new": it means the installed copy is
+  // stale or damaged — typically a pre-0.4.1 install whose binary was
+  // downloaded/compiled for a different Node, or an interrupted install.
+  // The fix is a clean reinstall, not hunting for per-ABI prebuilds.
   if (/NODE_MODULE_VERSION|ERR_DLOPEN_FAILED|Could not locate the bindings file/.test(tail)) {
     return (
-      `El daemon no arrancó: el módulo nativo better-sqlite3 no sirve para tu Node (${process.version}, ABI ${process.versions.modules}).\n` +
-      `Instala una versión que publique binario precompilado para node-v${process.versions.modules}-${process.platform}-${process.arch}\n` +
-      `(ver https://github.com/WiseLibs/better-sqlite3/releases), o usa Node LTS (22 o 24). \`npm rebuild\` falla si esa versión aún no soporta tu Node.`
+      `El daemon no arrancó: no se pudo cargar el módulo nativo de SQLite (Node ${process.version}, ${process.platform}-${process.arch}).\n` +
+      `Suele ser una instalación antigua o dañada. Reinstala la versión actual y vuelve a intentarlo:\n` +
+      `  npm install -g @josetra/wacon@latest\n` +
+      `Si persiste, ejecuta \`wacon doctor\` y comparte su salida.`
     );
   }
   if (/ENOSPC/.test(tail)) {

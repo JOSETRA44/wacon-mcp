@@ -34,7 +34,7 @@ El almacenamiento y el análisis básico funcionan en tu equipo. Las integracion
 
 ## Instalación
 
-Requiere **Node.js 22.18.0 o superior**, npm y una cuenta de WhatsApp para vincular el dispositivo.
+Requiere **Node.js 22.18.0 o superior** (se recomiendan las LTS 22 o 24; la línea actual, 25/26, también funciona), npm y una cuenta de WhatsApp para vincular el dispositivo. No necesitas herramientas de compilación: el binario de SQLite viaja dentro del paquete npm y es independiente de la versión de Node.
 
 ### Desde npm
 
@@ -44,6 +44,8 @@ wacon --version
 ```
 
 El paquete se llama `@josetra/wacon`; el comando instalado es `wacon`.
+
+> **Windows:** si la instalación intenta compilar y falla buscando Python o Visual Studio, actualiza npm (`npm install -g npm@latest`) y repite la instalación. Es un fallo conocido de npm 10 con binarios que ya vienen incluidos en el paquete; no necesitas instalar ninguna herramienta de compilación.
 
 También puedes ejecutarlo sin instalación global:
 
@@ -59,7 +61,7 @@ Disponible para instalar directamente desde el código fuente:
 npm install -g github:JOSETRA44/wacon-mcp
 ```
 
-Esta vía requiere Git y compila el proyecto durante la instalación. Wacon incluye dependencias nativas; si no hay un binario precompilado compatible con tu plataforma, la instalación puede requerir herramientas de compilación de C++.
+Esta vía requiere Git y compila el proyecto TypeScript durante la instalación. El binario nativo de SQLite ya viene dentro de su paquete npm (N-API), así que no hace falta un compilador de C++ en las plataformas habituales (Windows/macOS/Linux, x64 y arm64).
 
 ## Primeros pasos
 

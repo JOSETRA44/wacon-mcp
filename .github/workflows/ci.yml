@@ -11,7 +11,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-        node: [22, 24]
+        node: [22, 24, 26]
     runs-on: ${{ matrix.os }}
     env:
       WACON_SKIP_POSTINSTALL: "1"
@@ -21,6 +21,13 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
           cache: npm
+      # Same npm as the publish workflow. npm 10 (bundled with Node 22)
+      # ignores better-sqlite3 v13's "gypfile": false on Windows and runs
+      # an implicit node-gyp rebuild for a binary that already ships in
+      # the package (npm/cli#9837); its old node-gyp then fails to find
+      # Visual Studio on current runner images.
+      - name: Install npm 11
+        run: npm install -g npm@11
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
@@ -29,6 +36,16 @@ jobs:
       - name: Test the installed npm package
         shell: bash
         run: |
-          package_file=$(npm pack --ignore-scripts --json | node -e "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>console.log(JSON.parse(s)[0].filename))")
-          npm install --prefix "$RUNNER_TEMP/wacon-smoke" "$PWD/$package_file"
+          # Do NOT parse `npm pack --json` output: on npm 10 (Node 22) the
+          # prepare script's stdout (tsup's coloured "CLI" lines) is mixed
+          # into it and JSON.parse explodes. That is why this step has been
+          # red on Node 22 since 0.4.0. The tarball name is on disk instead.
+          npm pack --ignore-scripts
+          package_file=$(ls -t josetra-wacon-*.tgz | head -n 1)
+          # --ignore-scripts on purpose: the SQLite binary ships inside the
+          # better-sqlite3 package (N-API, since v13), so a user install must
+          # work even when no install script runs and no build tools exist.
+          # If a native dependency ever goes back to download/compile at
+          # install time, this step goes red.
+          npm install --ignore-scripts --prefix "$RUNNER_TEMP/wacon-smoke" "$PWD/$package_file"
           node scripts/smoke-package.mjs "$RUNNER_TEMP/wacon-smoke/node_modules/@josetra/wacon"
