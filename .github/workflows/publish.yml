@@ -42,4 +42,4 @@ jobs:
         run: node --input-type=module -e "import fs from 'node:fs'; const p = JSON.parse(fs.readFileSync('package.json', 'utf8')); if (process.env.RELEASE_TAG !== 'v' + p.version) throw new Error('Release tag must match v' + p.version);"
       - run: npm ci
       # npm publish runs prepublishOnly (types/tests), then prepare (build).
-      - run: npm publish --access public --provenance
+      - run: npm publish --access public --provenance --loglevel verbose
