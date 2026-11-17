@@ -29,7 +29,12 @@ jobs:
       - name: Test the installed npm package
         shell: bash
         run: |
-          package_file=$(npm pack --ignore-scripts --json | node -e "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>console.log(JSON.parse(s)[0].filename))")
+          # Do NOT parse `npm pack --json` output: on npm 10 (Node 22) the
+          # prepare script's stdout (tsup's coloured "CLI" lines) is mixed
+          # into it and JSON.parse explodes. That is why this step has been
+          # red on Node 22 since 0.4.0. The tarball name is on disk instead.
+          npm pack --ignore-scripts
+          package_file=$(ls -t josetra-wacon-*.tgz | head -n 1)
           # --ignore-scripts on purpose: the SQLite binary ships inside the
           # better-sqlite3 package (N-API, since v13), so a user install must
           # work even when no install script runs and no build tools exist.
