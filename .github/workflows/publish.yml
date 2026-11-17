@@ -4,6 +4,7 @@ name: Publish to npm
 on:
   release:
     types: [published]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -14,7 +15,7 @@ concurrency:
 
 jobs:
   publish:
-    if: ${{ !github.event.release.prerelease }}
+    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -23,14 +24,19 @@ jobs:
       WACON_SKIP_POSTINSTALL: "1"
     steps:
       - uses: actions/checkout@v4
+      # Node 24 bundles npm 11.5.1+, the minimum for OIDC trusted
+      # publishing. Node 22 + a manual `npm install -g npm@11` upgrade
+      # published unauthenticated and npm answered a misleading 404
+      # (the exact failure behind the v0.4.1 release attempts).
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           registry-url: https://registry.npmjs.org
-      - name: Install npm with OIDC support
-        run: npm install -g npm@11
+      - name: Show toolchain versions
+        run: node --version && npm --version
       - name: Check release tag
+        if: ${{ github.event_name == 'release' }}
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: node --input-type=module -e "import fs from 'node:fs'; const p = JSON.parse(fs.readFileSync('package.json', 'utf8')); if (process.env.RELEASE_TAG !== 'v' + p.version) throw new Error('Release tag must match v' + p.version);"
